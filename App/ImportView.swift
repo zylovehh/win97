@@ -47,6 +47,14 @@ struct ImportView: View {
     @State private var showDetail = false
     @State private var pkgToDelete: ImportedPackage?
 
+    /// 容器格式导入：待拆的原包 + 拆出来的壁纸列表 + 勾上的 UUID。
+    /// 一张的直接拆了导，多张的弹选择页让用户勾。
+    @State private var containerPendingData: Data?
+    @State private var containerOptions: [TendiesPackage.ContainerWallpaper] = []
+    @State private var containerSelection: Set<String> = []
+    @State private var showContainerPicker = false
+    @State private var containerBusy = false
+
     /// 列数：跟目录页一样的逻辑——iPad 横屏 6 列、竖屏 4 列，iPhone 2 列。
     /// 横竖屏按容器宽度判断（宽 > 900 算横屏），转屏时自动重算。
     private func columnCount(for width: CGFloat) -> Int {
@@ -145,6 +153,21 @@ struct ImportView: View {
                             let data = try Data(contentsOf: url)
                             let fileName = url.deletingPathExtension().lastPathComponent
                             let name = fileName.isEmpty ? url.lastPathComponent : fileName
+                            // 容器格式（原机 PosterBoard 整包拷贝）：一个文件里可能多张壁纸，
+                            // 先拆出来让用户选要哪几张；只有一张就直接拆了导，不弹选择。
+                            if TendiesPackage.isContainerFormat(data, zip: ZipFoundationAdapter()),
+                               let options = try? TendiesPackage.containerWallpapers(data, zip: ZipFoundationAdapter()),
+                               !options.isEmpty {
+                                containerPendingData = data
+                                containerOptions = options
+                                containerSelection = Set(options.map(\.descriptorUUID))
+                                if options.count == 1 {
+                                    confirmContainerImport()
+                                } else {
+                                    showContainerPicker = true
+                                }
+                                return
+                            }
                             state.setPackage(data, displayName: fileName.isEmpty ? nil : fileName)
                             // 存进导入库：包文件 + 封面图存沙盒，记录记下来，下次打开还在。
                             if let stored = state.packageData {
@@ -153,6 +176,65 @@ struct ImportView: View {
                             }
                         } catch {
                             message = "读文件失败：\(error.localizedDescription)"
+                        }
+                    }
+                }
+            }
+            .sheet(isPresented: $showContainerPicker) {
+                NavigationStack {
+                    List {
+                        Section {
+                            ForEach(containerOptions) { opt in
+                                Button {
+                                    if containerSelection.contains(opt.descriptorUUID) {
+                                        containerSelection.remove(opt.descriptorUUID)
+                                    } else {
+                                        containerSelection.insert(opt.descriptorUUID)
+                                    }
+                                } label: {
+                                    HStack {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(opt.displayName).font(.subheadline)
+                                            Text(opt.wallpaperDirectory)
+                                                .font(.caption).foregroundStyle(.secondary)
+                                        }
+                                        Spacer()
+                                        Image(systemName: containerSelection.contains(opt.descriptorUUID)
+                                              ? "checkmark.circle.fill" : "circle")
+                                            .foregroundStyle(containerSelection.contains(opt.descriptorUUID) ? .blue : .secondary)
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        } header: {
+                            Text("这个包是原机容器格式，里面有 \(containerOptions.count) 张壁纸，勾上要导入的。")
+                        }
+                        Section {
+                            Button("全选") { containerSelection = Set(containerOptions.map(\.descriptorUUID)) }
+                            Button("全不选") { containerSelection.removeAll() }
+                        }
+                    }
+                    .navigationTitle("选要导入的壁纸")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("取消") {
+                                showContainerPicker = false
+                                containerPendingData = nil
+                            }
+                            .disabled(containerBusy)
+                        }
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("导入所选（\(containerSelection.count)）") { confirmContainerImport() }
+                                .disabled(containerSelection.isEmpty || containerBusy)
+                        }
+                    }
+                    .overlay {
+                        if containerBusy {
+                            ProgressView("正在拆包…")
+                                .padding()
+                                .background(.ultraThinMaterial)
+                                .clipShape(RoundedRectangle(cornerRadius: 12))
                         }
                     }
                 }
@@ -236,6 +318,49 @@ struct ImportView: View {
         message = ""
         state.setPackage(data, displayName: pkg.displayName)
         showDetail = true
+    }
+
+    /// 容器格式确认导入：把勾上的每张壁纸拆成标准单张包，走老路
+    ///（setPackage 加密 + 检查 + 进导入库）。拆包是重活，放后台线程做，
+    ///只把拆好的包拿回主线程；一次导多张时 setPackage 连调几次，
+    ///最后那张是当前包——跟连续导几个包一样。
+    private func confirmContainerImport() {
+        guard let data = containerPendingData, !containerSelection.isEmpty else { return }
+        containerBusy = true
+        let selected = containerOptions.filter { containerSelection.contains($0.descriptorUUID) }
+        Task { @MainActor in
+            var imported = 0
+            var firstError: String?
+            for opt in selected {
+                let result = await Task.detached(priority: .userInitiated) {
+                    Result {
+                        try TendiesPackage.extractContainerWallpaper(
+                            data, descriptorUUID: opt.descriptorUUID, zip: ZipFoundationAdapter())
+                    }
+                }.value
+                switch result {
+                case .success(let normalized):
+                    state.setPackage(normalized, displayName: opt.displayName)
+                    if let stored = state.packageData {
+                        let thumb = ImportThumbnailMaker.make(from: stored)
+                        state.addImportedPackage(data: stored, displayName: opt.displayName, thumbnail: thumb)
+                    }
+                    imported += 1
+                case .failure(let error):
+                    if firstError == nil { firstError = error.localizedDescription }
+                }
+            }
+            containerBusy = false
+            showContainerPicker = false
+            containerPendingData = nil
+            if imported > 0 {
+                // 成功不用写字：新卡片已经排到导入库最上面，用户一眼就能看到；
+                // message 那行是红字，只留给失败用。
+                message = ""
+            } else {
+                message = "拆包失败：\(firstError ?? "原因不明")，换个包试试。"
+            }
+        }
     }
 
     /// 只在 iOS 26 的手机上显示配对文件下载入口：26 的手机自己生成不了

@@ -302,6 +302,27 @@ final class AppState: ObservableObject {
     /// 查看器分享时包在前、视频在后，包到了等 2.5 秒：视频到了就凑成一套发上传请求，
     /// 没等到也发上传请求（没视频也能传，封面从包里自动抠）；包同时进导入库，想装也能装。
     func receiveSharedPackage(data: Data, displayName: String) {
+        // 容器格式（分享进来的原机整包拷贝）：一个文件里多张壁纸，
+        // 分享入口没有选择界面，全部拆成标准单张包进导入库，
+        // 当前包设成最后一张；目录上传不要这种原包，直接跳过上传。
+        if TendiesPackage.isContainerFormat(data, zip: ZipFoundationAdapter()),
+           let options = try? TendiesPackage.containerWallpapers(data, zip: ZipFoundationAdapter()),
+           !options.isEmpty {
+            selectedTab = 1
+            var imported = 0
+            for opt in options {
+                guard let normalized = try? TendiesPackage.extractContainerWallpaper(
+                    data, descriptorUUID: opt.descriptorUUID, zip: ZipFoundationAdapter()) else { continue }
+                setPackage(normalized, displayName: opt.displayName)
+                if let stored = packageData {
+                    let thumb = ImportThumbnailMaker.make(from: stored)
+                    addImportedPackage(data: stored, displayName: opt.displayName, thumbnail: thumb)
+                    imported += 1
+                }
+            }
+            InstallLog.shared.append("分享进来的是容器格式，已拆成 \(imported) 张标准包存进导入库。")
+            return
+        }
         setPackage(data, displayName: displayName)
         // 先落到导入页：用户一分享过来就切到导入页，不干等。
         selectedTab = 1

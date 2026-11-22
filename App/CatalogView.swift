@@ -46,7 +46,8 @@ enum VideoCompressor {
             try data.write(to: src)
         } catch { return nil }
         let asset = AVURLAsset(url: src)
-        guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetMediumQuality) else { return nil }
+        // 之前用 MediumQuality 压得太狠、预览都看不清了，改成 1920x1080：清晰度够，文件也不大。
+        guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPreset1920x1080) else { return nil }
         session.outputURL = dst
         session.outputFileType = .mp4
         session.shouldOptimizeForNetworkUse = true

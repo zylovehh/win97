@@ -251,6 +251,183 @@ public enum TendiesPackage {
         return try zip.rebuild(entries: out)
     }
 
+    // MARK: - 容器格式（原机 PosterBoard 整包拷贝）
+
+    /// 容器格式里的一张壁纸：一个描述符就是一张。
+    public struct ContainerWallpaper: Identifiable, Hashable, Sendable {
+        public let descriptorUUID: String
+        public let wallpaperDirectory: String   // 如 7575.Titanium_Natural-D83.wallpaper
+        public let identifier: Int?             // Wallpaper.plist 的 identifier，如 7575
+        public let family: String?              // 如 Titanium
+        public let name: String?                // 如 Natural / Blue / White / Black
+        public var id: String { descriptorUUID }
+
+        /// 选择页上显示的名字：编号 + 家族 + 颜色，如「7575 · Titanium 原色」。
+        public var displayName: String {
+            var head = ""
+            if let identifier { head += "\(identifier)" }
+            if let family { head += head.isEmpty ? family : " · \(family)" }
+            if let name {
+                let color = Self.localizedColorName(name)
+                head += head.isEmpty ? color : " \(color)"
+            }
+            return head.isEmpty ? wallpaperDirectory : head
+        }
+
+        /// 颜色名翻中文（只做显示用，不改包里任何东西）。
+        private static func localizedColorName(_ name: String) -> String {
+            switch name.lowercased() {
+            case "natural": return "原色"
+            case "blue": return "蓝色"
+            case "white": return "白色"
+            case "black": return "黑色"
+            case "gold": return "金色"
+            case "silver": return "银色"
+            case "gray", "grey": return "灰色"
+            case "green": return "绿色"
+            case "red": return "红色"
+            case "pink": return "粉色"
+            case "purple": return "紫色"
+            case "yellow": return "黄色"
+            case "orange": return "橙色"
+            default: return name
+            }
+        }
+    }
+
+    /// 明文包数据：WALLIVE1 加密包先解密（跟 isOldFormat / convertingOldFormatToNew 同款）。
+    private static func plaintextForContainer(_ data: Data) throws -> Data {
+        if Wallive1Crypto.isWallive1(data) {
+            return try Wallive1Crypto.decrypt(data)
+        }
+        return data
+    }
+
+    /// 容器格式判断：包里有没有「埋在 Container/... 前缀下面」的描述符。
+    /// 标准包的 Wallpaper.plist 路径以 descriptors/ 开头；容器格式的包
+    ///（原机 PosterBoard 整包拷贝）前面还挂着
+    /// Container/Library/Application Support/PRBPosterExtensionDataStore/…/Extensions/…，
+    /// 导致 inspect() 认不出，直接报 missingWallpaperDirectory（error 1）。
+    /// 只要找到一条「descriptors 不在开头」的描述符 plist，就算容器格式。
+    public static func isContainerFormat(_ data: Data, zip: ZipEditing) -> Bool {
+        guard let plain = try? plaintextForContainer(data),
+              let entries = try? zip.listEntries(in: plain) else { return false }
+        return entries.contains { containerDescriptorPlistPath($0) != nil }
+    }
+
+    /// 容器格式里全部壁纸（按编号从小到大排）：每条描述符 plist 对应一张。
+    /// 不是容器格式、或容器里一条描述符都没有时返回空数组。
+    public static func containerWallpapers(_ data: Data, zip: ZipEditing) throws -> [ContainerWallpaper] {
+        let plain = try plaintextForContainer(data)
+        let entries = try zip.listEntries(in: plain)
+        var seen = Set<String>()
+        var out: [ContainerWallpaper] = []
+        for path in entries {
+            guard let found = containerDescriptorPlistPath(path) else { continue }
+            // 同一个 UUID 只取第一条 plist（两个容器拼一个包时可能重复）。
+            guard seen.insert(found.uuid).inserted else { continue }
+            var identifier: Int?
+            var family: String?
+            var name: String?
+            if let plistData = try? zip.readEntry(path, in: plain),
+               var format = PropertyListSerialization.PropertyListFormat.xml,
+               let plist = try? PropertyListSerialization.propertyList(from: plistData, format: &format) as? [String: Any] {
+                identifier = plist["identifier"] as? Int
+                family = plist["family"] as? String
+                name = plist["name"] as? String
+            }
+            out.append(ContainerWallpaper(
+                descriptorUUID: found.uuid,
+                wallpaperDirectory: found.wallpaperDirectory,
+                identifier: identifier,
+                family: family,
+                name: name
+            ))
+        }
+        // 编号从小到大排（7575、7580、7585、7590 这种顺序），没编号的沉底。
+        return out.sorted {
+            let a = $0.identifier ?? Int.max
+            let b = $1.identifier ?? Int.max
+            if a != b { return a < b }
+            return $0.descriptorUUID < $1.descriptorUUID
+        }
+    }
+
+    /// 把容器格式里的一张壁纸抽出来，重打成标准单张包：
+    ///   descriptors/<UUID>/versions/1/contents/…
+    /// 做法跟已验证的 repackage_15pro.py 一样：描述符那棵树整个搬到顶层，
+    /// versions/<n> 统一改成 versions/1（安装链只认 versions/1），其余文件
+    /// 逐字节原样保留——userInfo 本来就在 contents 根层，搬完还在根层；
+    /// Wallpaper.plist 的 identifier、编号、family 一律不动。
+    /// 返回明文 zip；调用方按老路（setPackage）再加密、检查、安装。
+    public static func extractContainerWallpaper(_ data: Data, descriptorUUID: String, zip: ZipEditing) throws -> Data {
+        let plain = try plaintextForContainer(data)
+        let entries = try zip.listEntries(in: plain)
+        // 定位这张壁纸的描述符前缀：…/descriptors/<UUID>/（Container 前缀有多长都行）。
+        guard let plistPath = entries.first(where: {
+            guard let found = containerDescriptorPlistPath($0) else { return false }
+            return found.uuid == descriptorUUID
+        }) else {
+            throw Error.missingWallpaperPlist
+        }
+        guard let marker = plistPath.range(of: "descriptors/\(descriptorUUID)/") else {
+            throw Error.missingWallpaperDirectory
+        }
+        let descriptorPrefix = String(plistPath[plistPath.startIndex..<marker.upperBound])
+        let descriptorEntries = entries.filter { $0.hasPrefix(descriptorPrefix) }
+        guard !descriptorEntries.isEmpty else { throw Error.missingWallpaperDirectory }
+
+        var out: [(path: String, data: Data)] = []
+        var seen = Set<String>()
+        for path in descriptorEntries {
+            let rel = String(path.dropFirst(descriptorPrefix.count))
+            // rel 开头是 versions/<n>/…（或空串、或侧标文件名）：版本号统一改成 1，
+            // 只改第一段，不动 supplements/0 这种里面的数字。
+            let newRel = normalizedVersionSegment(rel)
+            let newPath = "descriptors/\(descriptorUUID)/" + newRel
+            guard !seen.contains(newPath) else { continue }
+            seen.insert(newPath)
+            if path.hasSuffix("/") {
+                out.append((path: newPath, data: Data()))
+            } else {
+                out.append((path: newPath, data: try zip.readEntry(path, in: plain)))
+            }
+        }
+        return try zip.rebuild(entries: out)
+    }
+
+    /// 把「versions/<数字>/…」开头的相对路径改成「versions/1/…」；
+    /// 不是 versions 开头的（描述符根目录的侧标文件、空串）原样不动。
+    private static func normalizedVersionSegment(_ rel: String) -> String {
+        let parts = rel.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count >= 2, parts[0] == "versions", Int(parts[1]) != nil else { return rel }
+        var fixed = parts
+        fixed[1] = "1"
+        return fixed.joined(separator: "/")
+    }
+
+    /// 一条「容器格式描述符 plist」路径拆出来的信息：
+    ///   …/descriptors/<UUID>/versions/<n>/contents/<名>.wallpaper/Wallpaper.plist
+    /// 标准包（descriptors 在开头）不算——它走 inspect() 的老路。
+    /// 返回 nil 表示这条路径不是容器格式的描述符 plist。
+    private static func containerDescriptorPlistPath(_ path: String) -> (uuid: String, wallpaperDirectory: String)? {
+        guard path.hasSuffix(".wallpaper/Wallpaper.plist") else { return nil }
+        let parts = path.split(separator: "/").map(String.init)
+        guard parts.count >= 8 else { return nil }
+        let n = parts.count
+        // 倒数 6 段：descriptors / <UUID> / versions / <数字> / contents / <名>.wallpaper，
+        // 最后一段是 Wallpaper.plist。
+        guard parts[n - 7] == "descriptors",
+              parts[n - 6].count == 36,
+              parts[n - 5] == "versions",
+              Int(parts[n - 4]) != nil,
+              parts[n - 3] == "contents",
+              parts[n - 2].hasSuffix(".wallpaper") else { return nil }
+        // descriptors 不在开头才是容器格式；标准包（descriptors 在开头）不算。
+        guard parts[0] != "descriptors" else { return nil }
+        return (uuid: parts[n - 6], wallpaperDirectory: parts[n - 2])
+    }
+
     // MARK: - 旧格式转换的正则与 XML 小工具
 
     /// Drift 同款 index.xml 模板（modernIndexXML）：键名按字母序、值逐项照抄二进制里还原的模板。
