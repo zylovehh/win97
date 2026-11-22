@@ -1,8 +1,9 @@
 // CatalogModel.swift
 // 目录数据：一条壁纸的元数据、目录拉取、已下载管理。
 // 目录表 catalog.json 放在仓库根目录，App 打开时按分发线路顺序拉取
-// （jsDelivr Fastly → jsDelivr Gcore → 仓库 raw 兜底），国内访问走前两条快线；
-// 全部失败就显示空状态，不崩。壁纸包、预览视频、缩略图放仓库 wallpapers/ 目录。
+// （多镜像，照 Camlo 的做法：国内优先走代理镜像，国外优先走原站和 jsDelivr，
+// 一条挂了自动试下一条）；全部失败就显示空状态，不崩。
+// 壁纸包、预览视频、缩略图放仓库 wallpapers/ 目录。
 // 管理端推完目录/传完壁纸后，自动清一下 CDN 缓存，用户端马上能看到新内容。
 
 import Foundation
@@ -92,18 +93,120 @@ struct DownloadedItem: Identifiable, Codable, Equatable {
     let downloadedAt: Date
 }
 
+/// 多镜像线路（照 Camlo 的做法搬过来：CloudGalleryManager.buildRepoURLs）。
+/// GitHub 上的一个文件，按地区排 7 条线路，一条挂了自动试下一条：
+/// 国内（中国）优先走代理镜像——GitHub 原站在国内经常慢甚至打不开；
+/// 国外优先走原站和 jsDelivr——本机实测原站和 Fastly 最快（0.8 秒）。
+enum MirrorRoutes {
+    /// 是否优先走国内镜像：地区是中国，或时区是上海/重庆。
+    /// 语言故意不算——海外华人手机多半也是简体中文，但在马来西亚这类地方
+    /// GitHub 原站很快，按语言算会把他们错划成国内、反而变慢。
+    static var prefersCNMirror: Bool {
+        let region = Locale.current.region?.identifier.uppercased() ?? ""
+        if region == "CN" { return true }
+        let tz = TimeZone.current.identifier
+        return tz == "Asia/Shanghai" || tz == "Asia/Chongqing"
+    }
+
+    /// 一个仓库文件的全部镜像地址（按地区排好序，去重）。
+    /// slug 是 "用户/仓库"，branch 是分支，path 是仓库里的相对路径。
+    static func repoFileURLs(slug: String, branch: String, path: String) -> [URL] {
+        let cleanPath = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let raw = "https://raw.githubusercontent.com/\(slug)/\(branch)/\(cleanPath)"
+        let ghFast = "https://ghfast.top/\(raw)"
+        let ghProxy = "https://gh-proxy.com/\(raw)"
+        let ghProxyNet = "https://ghproxy.net/\(raw)"
+        let jsdMirror = "https://cdn.jsdmirror.com/gh/\(slug)@\(branch)/\(cleanPath)"
+        let jsDelivr = "https://fastly.jsdelivr.net/gh/\(slug)@\(branch)/\(cleanPath)"
+        let gcore = "https://gcore.jsdelivr.net/gh/\(slug)@\(branch)/\(cleanPath)"
+        let ordered: [String]
+        if prefersCNMirror {
+            ordered = [ghFast, ghProxy, ghProxyNet, jsdMirror, jsDelivr, gcore, raw]
+        } else {
+            ordered = [raw, jsDelivr, gcore, ghFast, ghProxy, ghProxyNet, jsdMirror]
+        }
+        var seen = Set<String>()
+        return ordered.compactMap { str in
+            guard seen.insert(str).inserted else { return nil }
+            return URL(string: str)
+        }
+    }
+
+    /// 一个仓库的根地址（不带具体文件），按地区排好序，供目录表这类按根拼地址的调用方用。
+    static func repoBaseURLs(slug: String, branch: String) -> [String] {
+        let raw = "https://raw.githubusercontent.com/\(slug)/\(branch)"
+        let ghFast = "https://ghfast.top/\(raw)"
+        let ghProxy = "https://gh-proxy.com/\(raw)"
+        let ghProxyNet = "https://ghproxy.net/\(raw)"
+        let jsdMirror = "https://cdn.jsdmirror.com/gh/\(slug)@\(branch)"
+        let jsDelivr = "https://fastly.jsdelivr.net/gh/\(slug)@\(branch)"
+        let gcore = "https://gcore.jsdelivr.net/gh/\(slug)@\(branch)"
+        if prefersCNMirror {
+            return [ghFast, ghProxy, ghProxyNet, jsdMirror, jsDelivr, gcore, raw]
+        } else {
+            return [raw, jsDelivr, gcore, ghFast, ghProxy, ghProxyNet, jsdMirror]
+        }
+    }
+
+    /// 一个现成的下载地址（jsDelivr / raw / 镜像代理形式都认），拆出仓库、分支、路径，
+    /// 返回按地区排好的全部镜像地址；拆不出来就原样返回这一条（不拦着下）。
+    static func mirrorURLs(for address: String) -> [URL] {
+        guard let (slug, branch, path) = parseRepoFile(address) else {
+            return URL(string: address).map { [$0] } ?? []
+        }
+        return repoFileURLs(slug: slug, branch: branch, path: path)
+    }
+
+    /// 从一个地址里拆出（仓库 slug、分支、路径）：
+    /// jsDelivr 系（fastly/cdn/gcore）：https://<host>/gh/<用户>/<仓库>@<分支>/<路径>
+    /// jsdmirror：https://cdn.jsdmirror.com/gh/<用户>/<仓库>@<分支>/<路径>
+    /// raw 直链：https://raw.githubusercontent.com/<用户>/<仓库>/<分支>/<路径>
+    /// 代理镜像（ghfast/gh-proxy/ghproxy.net）：去掉前缀后按 raw 直链再拆。
+    /// 拆不出来返回 nil。
+    static func parseRepoFile(_ address: String) -> (slug: String, branch: String, path: String)? {
+        // 代理前缀先剥掉，里面就是一条 raw 直链。
+        for prefix in ["https://ghfast.top/", "https://gh-proxy.com/", "https://ghproxy.net/"] {
+            if address.hasPrefix(prefix) {
+                return parseRepoFile(String(address.dropFirst(prefix.count)))
+            }
+        }
+        // jsDelivr 系 / jsdmirror：.../gh/<slug>@<branch>/<path>
+        for host in ["https://fastly.jsdelivr.net/gh/", "https://cdn.jsdelivr.net/gh/",
+                     "https://gcore.jsdelivr.net/gh/", "https://cdn.jsdmirror.com/gh/"] {
+            guard address.hasPrefix(host) else { continue }
+            let rest = String(address.dropFirst(host.count))
+            guard let at = rest.firstIndex(of: "@"),
+                  let slash = rest[rest.index(after: at)...].firstIndex(of: "/") else { return nil }
+            let slug = String(rest[..<at])
+            let branch = String(rest[rest.index(after: at)..<slash])
+            let path = String(rest[rest.index(after: slash)...])
+            guard slug.contains("/"), !branch.isEmpty, !path.isEmpty else { return nil }
+            return (slug, branch, path)
+        }
+        // raw 直链：.../<用户>/<仓库>/<分支>/<路径>
+        let rawHost = "https://raw.githubusercontent.com/"
+        guard address.hasPrefix(rawHost) else { return nil }
+        let rest = String(address.dropFirst(rawHost.count))
+        let parts = rest.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count >= 4 else { return nil }
+        let slug = "\(parts[0])/\(parts[1])"
+        let branch = String(parts[2])
+        let path = parts[3...].joined(separator: "/")
+        guard !path.isEmpty else { return nil }
+        return (slug, branch, path)
+    }
+}
+
 /// 目录仓库：拉目录表、下载壁纸包、管理已下载列表。
 /// 已下载记录存在 UserDefaults，文件存在沙盒 Documents/downloaded-wallpapers/。
 @MainActor
 final class CatalogStore: ObservableObject {
-    /// 目录表拉取顺序：仓库直链在先（新表马上能看到）→ Fastly → Gcore。
-    /// 大文件仍走 Fastly 加速，不跟目录表一起改直链。
+    /// 目录表拉取顺序（多镜像，按地区排，见 MirrorRoutes）：
+    /// 国内优先走代理镜像（GitHub 原站在国内经常慢），国外优先走原站和 jsDelivr。
     /// 改仓库名或分支要同步改这里。
-    static let catalogHosts = [
-        "https://raw.githubusercontent.com/zylovehh/win97-catalog/main",
-        "https://fastly.jsdelivr.net/gh/zylovehh/win97-catalog@main",
-        "https://gcore.jsdelivr.net/gh/zylovehh/win97-catalog@main",
-    ]
+    static var catalogHosts: [String] {
+        MirrorRoutes.repoBaseURLs(slug: "zylovehh/win97-catalog", branch: "main")
+    }
 
     /// 目录表地址（主线路；实际拉取在 fetch 里按 catalogHosts 顺序尝试）。
     static let catalogURLString = catalogHosts[0] + "/" + catalogPath
@@ -206,9 +309,10 @@ final class CatalogStore: ObservableObject {
     /// 直接拿去下会失败（没域名），这里先拼成 Fastly 加速的完整地址再下。
     /// 注意 wallpapersRawBase 末尾已经是 wallpapers/，相对路径开头的 wallpapers/ 要去掉再拼，
     /// 不然会拼出两层 wallpapers。
-    /// jsDelivr 拉不到时自动换源：超 20M 的包它直接 403、缓存过期会 404，
-    /// 有的手机网络还根本到不了 jsDelivr（断网、超时、连不上，连状态码都没有），
-    /// 这几种都换 raw.githubusercontent.com 直链再下一次（直链没 20M 限制，能下 100M 以内的文件）。
+    /// 多镜像兜底（见 MirrorRoutes）：不管目录表里写的是 Fastly 还是 raw，
+    /// 都拆出仓库、分支、路径，按地区排 7 条线路逐条试——超 20M 的包 jsDelivr 直接 403、
+    /// 缓存过期会 404、有的手机网络还根本到不了某条线路（断网、超时、连不上，连状态码都没有），
+    /// 这几种都自动换下一条，不换源就永远下不来。
     func download(_ item: CatalogItem) async -> Data? {
         let packageAddress: String
         if item.packageURL.hasPrefix("http") {
@@ -219,27 +323,27 @@ final class CatalogStore: ObservableObject {
                 : item.packageURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             packageAddress = Self.wallpapersRawBase + path
         }
-        guard let url = URL(string: packageAddress),
-              !downloadingIDs.contains(item.id) else { return nil }
+        guard !downloadingIDs.contains(item.id) else { return nil }
         downloadingIDs.insert(item.id)
         defer { downloadingIDs.remove(item.id) }
-        // 主链（Fastly）先下；拉不到就换 raw 直链再下一次。
-        // 换源不只看 403/404：有的手机网络根本到不了 jsDelivr（断网、超时、连不上），
-        // 那时连状态码都没有，不换源就永远下不来。raw 是目录表同款地址，手机上已证能通。
-        if let data = await Self.fetchData(from: url) {
-            return saveDownload(data, for: item)
+        // 多镜像：按地区排好的线路逐条试，一条通了就行。
+        for url in MirrorRoutes.mirrorURLs(for: packageAddress) {
+            if let data = await Self.fetchData(from: url) {
+                return saveDownload(data, for: item)
+            }
         }
-        if let fallbackURL = Self.rawGitHubURL(from: packageAddress),
-           let data = await Self.fetchData(from: fallbackURL) {
-            return saveDownload(data, for: item)
-        }
-        errorMessage = "下载失败：主链和备用链都拉不到，请检查网络后重试"
+        errorMessage = "下载失败：所有线路都拉不到，请检查网络后重试"
         return nil
     }
 
     /// 拉一次：200 且拿到数据才返回，否则 nil（断网、超时、403/404 都算拉不到）。
+    /// 单条线路 15 秒超时，超时就换下一条，别一条卡住整趟下载。
+    /// 破本地缓存：同一个地址的文件可能被替换过（比如重编的同名 IPA/包），
+    /// 不破缓存会拿到旧文件。
     private static func fetchData(from url: URL) async -> Data? {
-        guard let (data, response) = try? await URLSession.shared.data(from: url),
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
+        request.timeoutInterval = 15
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
               (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
         return data
     }

@@ -269,14 +269,20 @@ enum UpdateChecker {
     static let versionURL = URL(string: "https://zylovehh.github.io/win97/version.json")!
     /// 点“去下载”跳去的下载页。
     static let downloadPageURL = URL(string: "https://zylovehh.github.io/win97/")!
-    /// version.json 的几个地址：下载页直链 → raw 直链 → Fastly → Gcore，
-    /// 一条通了就行（目录拉取也是这个顺序，单条线路挂了不影响查更新）。
-    static let versionURLs = [
-        "https://zylovehh.github.io/win97/version.json",
-        "https://raw.githubusercontent.com/zylovehh/win97/main/docs/version.json",
-        "https://fastly.jsdelivr.net/gh/zylovehh/win97@main/docs/version.json",
-        "https://gcore.jsdelivr.net/gh/zylovehh/win97@main/docs/version.json",
-    ]
+    /// version.json 的几个地址（多镜像，按地区排，见 MirrorRoutes）：
+    /// 国内优先走代理镜像，国外优先走下载页直链和原站，一条通了就行。
+    /// 下载页直链（GitHub Pages）国外放最前面、国内放最后面。
+    static var versionURLs: [String] {
+        var urls = MirrorRoutes.repoFileURLs(slug: "zylovehh/win97", branch: "main", path: "docs/version.json")
+            .map(\.absoluteString)
+        let page = "https://zylovehh.github.io/win97/version.json"
+        if MirrorRoutes.prefersCNMirror {
+            urls.append(page)
+        } else {
+            urls.insert(page, at: 0)
+        }
+        return urls
+    }
 
     /// 从 BuildInfo.tag（比如 "V1.5 正式版"）里抠出版本号数字（1.5）。
     static func localVersionNumber() -> Double {
@@ -295,12 +301,18 @@ enum UpdateChecker {
     }
 
     /// 拉 version.json，比版本号。几条线路都拉不到就报 failed（调用方决定要不要提示）。
+    /// 每条线路 15 秒超时 + 时间戳破缓存（目录拉取早有了，查更新这次也补上，
+    /// 不然 CDN 缓存的旧 version.json 会让新版查不出来）。
     static func checkForUpdate() async -> UpdateCheckResult {
         let local = localVersionNumber()
         for urlString in versionURLs {
-            guard let url = URL(string: urlString) else { continue }
+            guard var components = URLComponents(string: urlString) else { continue }
+            components.queryItems = [URLQueryItem(name: "ts", value: String(Int(Date().timeIntervalSince1970)))]
+            guard let url = components.url else { continue }
             do {
-                let (data, _) = try await URLSession.shared.data(from: url)
+                var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
+                request.timeoutInterval = 15
+                let (data, _) = try await URLSession.shared.data(for: request)
                 let remote = try JSONDecoder().decode(RemoteVersion.self, from: data)
                 if remote.number > local {
                     return .available(remote)
