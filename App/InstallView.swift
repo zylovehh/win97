@@ -7,12 +7,11 @@ import WebKit
 
 struct InstallView: View {
     @EnvironmentObject private var state: AppState
-    /// 安装方式（Drift 同款分段控件）：自动=看配对记录（没配对走直刷、
-    /// 有配对走隧道）；直刷=逃逸直写；隧道=配对隧道写盘。
+    /// 安装方式（分段控件）：直刷=逃逸直写；隧道=配对隧道写盘。
     private enum Method {
-        case auto, direct, tunnel
+        case direct, tunnel
     }
-    @State private var method: Method = .auto
+    @State private var method: Method = .direct
     @State private var installing = false
     @State private var result = ""
     @State private var installLog = ""
@@ -35,11 +34,6 @@ struct InstallView: View {
             ? "（注意：iOS 27.3 起参照应用标「无可用通道」，直刷未必装得上。）"
             : ""
         switch method {
-        case .auto:
-            let verdict = state.hasPairingFile
-                ? "本机判定：读到了配对文件 → 这次走隧道（先开好回环 VPN）。删掉配对文件再点，就自动改走直刷。"
-                : "本机判定：没读到配对文件 → 这次走直刷。导了配对文件再点，就自动改走隧道。"
-            return "自动=看本机情况：没配对走直刷，导了配对文件走隧道。判定结果在按钮下面写明。" + verdict + blocked
         case .direct:
             return "手动指定直刷：不管有没有配对文件，都走逃逸直写，不碰配对、不需要 VPN。" + blocked
         case .tunnel:
@@ -65,7 +59,6 @@ struct InstallView: View {
 
                 Text("安装方式").font(.headline)
                 Picker("安装方式", selection: $method) {
-                    Text("自动").tag(Method.auto)
                     Text("直刷").tag(Method.direct)
                     Text("隧道").tag(Method.tunnel)
                 }
@@ -122,10 +115,8 @@ struct InstallView: View {
         result = ""
         installLog = ""
         defer { installing = false }
-        // 自动=没配对走直刷、有配对走隧道；手动选定不自动改道（Drift 同款）。
         let channel: InstallChannel
         switch method {
-        case .auto: channel = state.hasPairingFile ? .tunnel : .direct
         case .direct: channel = .direct
         case .tunnel: channel = .tunnel
         }
