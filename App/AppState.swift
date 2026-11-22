@@ -529,11 +529,11 @@ final class AppState: ObservableObject {
 
     /// 备份路安装（V1.19 起是唯一安装路）：走描述符直写那条（直读找库 +
     /// 逃逸直写，只写描述符目录）。结果记进 installReports，报告里
-    /// `mode` 是 `.backup`。装完界面补本地桌面刷新，重启手机只作后备按钮。
+    /// `mode` 是 `.backup`。装完界面自动注销桌面刷新，不再让用户重启手机。
     /// V1.19：配对路径恒传空串——这条路全程不碰配对隧道，绝不拿着配对
-    /// 文件路径去碰隧道（27.2 上隧道必须回环 VPN）。走没走成描述符直写
-    /// 用结果的 `preferencesWritten` 判断：这条路从不写偏好，为 false；
-    /// 老的改表路才为 true。
+    /// 文件路径去碰隧道（27.2 上隧道必须回环 VPN）。
+    /// V2.7：无配对路装完也写偏好（刷新组合拳），`preferencesWritten`
+    /// 不再当“走了哪条路”的判断，只表示偏好写没写。
     private func installWithReportBackup(data: Data,
                                          onProgress: ((String, Double) -> Void)? = nil,
                                          preparedStage: RestoreTest.PreparedStage? = nil) async throws -> InstallReport? {
@@ -548,16 +548,12 @@ final class AppState: ObservableObject {
                 onProgress: onProgress,
                 displayName: packageDisplayName,
                 preparedStage: preparedStage)
-            let configurationsDir = "Library/Application Support/PRBPosterExtensionDataStore/"
-                + "Extensions/\(outcome.extensionID)/configurations"
-            // 走没走成描述符直写看结果：这条路从不写偏好，preferencesWritten
-            // 一定是 false；老的改表路才写偏好（true）。没写偏好的报告里
-            // 不凑 configurations 那行。
-            let isDescriptorOnlyPath = !outcome.preferencesWritten
-            let injectResults = isDescriptorOnlyPath
-                ? outcome.injectResults
-                : [InjectResult(targetParentDir: configurationsDir, ok: true, error: nil)]
-                    + outcome.injectResults
+            // V2.7：这条路恒走描述符直写（restore() 一律走 restoreNoPairing，
+            // 老的改表路已停用），不再拿 preferencesWritten 当路的判断——
+            // 无配对路现在装完也写偏好（刷新组合拳），preferencesWritten
+            // 为 true 不代表走了改表路。报告里只放真实注入结果，不凑
+            // configurations 那行。
+            let injectResults = outcome.injectResults
             // V1.36（Drift 同款）：把写后核验结论带给界面——核验在册才报
             // 「已核验」，核验不上如实说「已写入、未确认显示」，不把话说满。
             let verifyNote: String
@@ -575,17 +571,12 @@ final class AppState: ObservableObject {
                 preferencesWritten: outcome.preferencesWritten,
                 verifyResults: [],
                 registration: nil,
-                // 刷新结论原样带给界面：确认了就不补桌面刷新，没确认
-                // 就由界面补一次本地网页法只重启桌面。
+                // 刷新结论原样带给界面：确认了就自动注销桌面刷新，没确认
+                // 也一样自动注销桌面（V2.7 起不再让用户重启手机）。
                 refresh: RefreshResult(confirmed: outcome.refreshConfirmed),
                 mode: .backup,
-                backupSummary: isDescriptorOnlyPath
-                    ? "壁纸已写好（只写描述符目录，表和偏好没碰）。" + verifyNote
-                        + "正在刷新桌面，回来后锁屏长按进图库，出现后再设为墙纸组合。"
-                    : "备份还原已完成（\(outcome.payloadCount) 个载荷，"
-                        + "商店：\(outcome.storeSummary)）。" + (outcome.needsReboot
-                            ? "重启手机后去锁屏图库查看，出现后再点设为墙纸组合。"
-                            : "PosterBoard 已刷新，去锁屏图库查看，出现后再点设为墙纸组合。"))
+                backupSummary: "壁纸已写好（只写描述符目录，表没碰；图库缓存已清、偏好已写）。" + verifyNote
+                    + "正在刷新桌面，回来后锁屏长按进图库，出现后再设为墙纸组合。")
             installHistory.append(report.descriptorUUID)
             installReports.append(report)
             return report

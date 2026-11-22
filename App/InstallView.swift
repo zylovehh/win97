@@ -73,7 +73,7 @@ struct InstallView: View {
                 .buttonStyle(.borderedProminent)
                 // 不配对也能装：按钮只看包和安装状态（没配对走直刷）。
                 .disabled(state.packageData == nil || installing)
-                Text("装完自动刷新：不用注销，锁屏长按进图库就能看到。").font(.caption)
+                Text("装完自动刷新桌面：桌面黑一下自己回来，锁屏长按进图库就能看到。").font(.caption)
                     .foregroundStyle(.secondary)
 
                 // 手动刷新海报：装完海报卡片有时候不出来，点这个把海报界面拉起来。
@@ -147,39 +147,26 @@ struct InstallView: View {
             text += "读回核对没过：描述符缺了东西——把日志发来看。"
         }
         if report.refresh?.confirmed != true {
-            text += "配对刷新没确认，重启手机后再去锁屏图库看。"
+            // V2.7：刷新没确认就自动注销桌面，不再让用户重启手机。
+            DesktopRestart.trigger()
+            text += "配对刷新没确认，已自动注销桌面，回来后去锁屏图库看。"
         }
         return text
     }
 
-    /// 直刷结果（Drift 打头 + 暗号退路）：装完用私有接口把 PosterBoard 应用
-    /// 整个唤出来——它一露头系统就重读壁纸，用户上滑关掉卡片即生效；
-    /// 私有接口叫不动，退 posterboard:// 暗号（用户拍板保留的退路）；
-    /// 暗号也不行就照实说明，不自动压桌面。
+    /// 直刷结果（V2.7）：装完自动注销桌面（WebKit 注销桌面）刷新，不再走
+    /// “拉海报应用”那套（会被注销桌面杀掉），也不再让用户重启手机。
+    /// 刷新已确认就不用再刷，直接让用户去图库看。
     private func directResult(_ report: InstallReport) async {
         let uuid = report.descriptorUUID
         let verify = report.backupSummary ?? ""
-        if PosterBoardLauncher.launch() {
-            result = "安装完成（直刷路），描述符 UUID：\(uuid)。\(verify)海报界面拉起来了——上滑关掉卡片，锁屏长按进图库查看。"
-            installLog = InstallLog.shared.tail(200)
-            return
-        }
-        InstallLog.shared.append("restore: 私有接口没叫动海报应用，退 posterboard:// 暗号。")
-        if let posterBoardURL = URL(string: "posterboard://") {
-            result = "安装完成（直刷路），描述符 UUID：\(uuid)。\(verify)海报应用马上弹出来——上滑关掉它，锁屏长按进图库查看。"
-            UIApplication.shared.open(posterBoardURL) { ok in
-                guard !ok else { return }
-                // open 的回调不保证主线程；result 是界面状态，必须回主线程改。
-                DispatchQueue.main.async {
-                    InstallLog.shared.append("restore: 暗号也没叫动，去锁屏长按进图库看装没装上。")
-                    result = "安装完成（直刷路），描述符 UUID：\(uuid)。\(verify)海报没叫动——锁屏长按进图库看看装没装上，日志里有调用结果。"
-                    installLog = InstallLog.shared.tail(200)
-                }
-            }
+        if report.refresh?.confirmed == true {
+            result = "安装完成（直刷路），描述符 UUID：\(uuid)。\(verify)锁屏长按进图库查看。"
         } else {
-            result = "安装完成（直刷路），描述符 UUID：\(uuid)。\(verify)海报没叫动——锁屏长按进图库看看装没装上，日志里有调用结果。"
-            installLog = InstallLog.shared.tail(200)
+            DesktopRestart.trigger()
+            result = "安装完成（直刷路），描述符 UUID：\(uuid)。\(verify)桌面正在刷新，回来后锁屏长按进图库查看。"
         }
+        installLog = InstallLog.shared.tail(200)
     }
 
     /// 手动刷新海报：装完海报卡片有时候不出来，点“手动刷新海报”把 PosterBoard 拉起来。

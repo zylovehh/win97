@@ -413,8 +413,8 @@ private struct ReceiptManageView: View {
                                     InstallLog.shared.append("manage: 暗号也没叫动，靠通知自己刷新。")
                                     resultOK = sent
                                     resultNote = sent
-                                        ? "海报没叫动，靠通知刷新（免杀进程），卡片一般立刻对上。没变化就重启手机再看。"
-                                        : "海报没叫动，通知也没发出去（见安装日志）。重启手机后再看。"
+                                        ? "海报没叫动，靠通知刷新（免杀进程），卡片一般立刻对上。没变化再点一次。"
+                                        : "海报没叫动，通知也没发出去（见安装日志）。再点一次。"
                                     deleteBusy = false
                                 }
                             }
@@ -422,8 +422,8 @@ private struct ReceiptManageView: View {
                         } else {
                             resultOK = sent
                             resultNote = sent
-                                ? "已发通知让图库重读（免杀进程），卡片一般立刻对上。没变化就重启手机再看。"
-                                : "通知没发出去（见安装日志）。重启手机后照样生效。"
+                                ? "已发通知让图库重读（免杀进程），卡片一般立刻对上。没变化再点一次。"
+                                : "通知没发出去（见安装日志）。再点一次。"
                         }
                         deleteBusy = false
                     }
@@ -630,7 +630,7 @@ private struct ReceiptManageView: View {
                     note = note
                         .replacingOccurrences(of: "上滑关掉海报应用（或刷新桌面）后生效。", with: "")
                         .trimmingCharacters(in: .whitespaces)
-                    note += " 已通知图库重读（免杀进程），卡片一般立刻消失；没消再上滑关掉海报应用（或重启手机）看一眼。"
+                    note += " 已通知图库重读（免杀进程），卡片一般立刻消失；没消再上滑关掉海报应用（或点「刷新桌面」）看一眼。"
                 } else if !pairingPath.isEmpty {
                     // 有配对就自动刷新：原话里的「上滑关掉海报应用」被刷新
                     // 结论取代，避免自相矛盾。

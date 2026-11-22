@@ -40,8 +40,8 @@
 //   7. 写偏好：照直装同一份 PosterBoard 偏好写一次（重载开关），
 //      让系统重载描述符、重新索引。
 //   8. 刷新：调一次 al_posterboard_refresh 杀 PosterBoard 重读；刷新失败
-//      不算错，只是还得重启手机再看。
-//   9. 提示用户去图库长按看有没有这张壁纸（刷新确认了不用重启也行）。
+//      不算错，只是还得刷新桌面再看。
+//   9. 提示用户去图库长按看有没有这张壁纸（刷新确认了不用刷新也行）。
 //
 // 注意：
 // - 正式版已接进 BackupInstallFlow（备份还原那条路）；直写、备份、探针 3
@@ -50,7 +50,7 @@
 //   离线锁定构建加不进去），插行走 Swift 自带的 SQLite3，和探针 3
 //   合库那套一样；Rust 只做它才能做的事（隧道 + AirTraffic 写回）。
 // - 写回是活机写：PosterBoard 进程还开着旧表，写完马上调刷新；刷新
-//   确认了不用重启，没确认再重启手机看。重启前别去图库里划来划去。
+//   确认了不用刷新，没确认再刷新桌面看。刷新前别去图库里划来划去。
 
 import Foundation
 import Darwin
@@ -81,8 +81,9 @@ struct RestoreOutcome {
     /// 成功时一定是 true（写偏好是必经步骤，失败就停了）。
     let preferencesWritten: Bool
     let refreshConfirmed: Bool
-    /// 刷新失败且 PosterBoard 杀掉后没回来时为 true：只有重启手机能让它
-    /// 重读新表，导入页备份装完给用户一个“重启手机”按钮（用户亲手点才重启）。
+    /// 刷新失败且 PosterBoard 杀掉后没回来时为 true（老备份路用）：导入页
+    /// 备份装完据此给用户一个刷新提示。V2.7 起不再让用户重启手机——
+    /// 无配对路装完走刷新组合拳 + 界面自动注销桌面，这一位恒为 false。
     let rebootNeeded: Bool
     /// 这次走的是哪条路（默认备份还原，测试版是 `.test`）。报告 JSON 里
     /// 同样记 `mode` / `method`（"test" / "backup"）。
@@ -535,7 +536,8 @@ enum RestoreTest {
                                 preparedStage: PreparedStage? = nil) throws -> RestoreOutcome {
         try checkCancelled(isCancelled)
         // V1.19：不分系统版本、不看配对记录，一律走描述符直写路
-        // （直读找库 + 逃逸直写，只写一个描述符目录，不碰表和偏好）。
+        // （直读找库 + 逃逸直写，只写一个描述符目录，不碰表；
+        //  V2.7 起装完补刷新组合拳：清 GalleryCache + 写偏好 + 发通知）。
         // 人家真机跑通的就是这条；备份路多出来的改表工序全停用，
         // 配对隧道一个字不碰——27.2 上不连 VPN 也装。
         return try restoreNoPairing(packageData: packageData, report: &report,
@@ -600,8 +602,275 @@ enum RestoreTest {
         // 没这个文件照样能用，直接删掉，省得图库按旧 id 找条目。
         try? fm.removeItem(at: copyDir.appendingPathComponent(
             "com.apple.posterkit.provider.identifierURL.suggestionMetadata.plist"))
+        // V2.7（Camlo 规范化）：缺的种子 plist 就地补齐（角色 sidecar、
+        // providerInfo、运行时快照、titleStyle 等）、清异机 .atx、去硬件锁、
+        // 修 logicalScreenClass、浮动层 Clownfish 迁移。建议元数据上面已按
+        // V1.11 直接删掉（Camlo 只删撞号的，我们删得更彻底——里面嵌着旧 id，
+        // 留着系统会按旧 id 找条目出黑卡片），规范化里不再碰它。
+        normalizeDescriptorForCurrentOS(in: copyDir, log: log)
         log("备料完成。")
         return PreparedStage(dir: copyDir, uuid: descriptorUUID, numericId: numericId)
+    }
+
+    // MARK: - 描述符规范化（V2.7，Camlo normalizeDescriptorForCurrentOS 同款做法）
+
+    /// 装前规范化（照 Camlo `normalizeDescriptorForCurrentOS` 的做法重写，
+    /// 只针对 CollectionsPoster 描述符）：
+    /// 1. 清掉 __MACOSX / .DS_Store / .lock / ._* 杂文件；
+    /// 2. 缺了补角色 sidecar（PRPosterRoleLockScreen）、providerInfo；
+    /// 3. 每个 versions/\<n\>：补 homescreen 配置、home/lock 运行时快照、
+    ///    complicationLayout、titleStyle；contents 里补 configurableOptions、
+    ///    otherMetadata；清掉该版本下所有 .atx 异机快照；
+    /// 4. Wallpaper.plist 去 productTypes 硬件锁；非动态、非 Marble 且
+    ///    logicalScreenClass == "any" 的修成 390w-844h@3x~iphone；
+    /// 5. Clownfish 迁移：浮动层有镂空但名字里没 Clownfish 的，.wallpaper
+    ///    目录名插 _Clownfish 并同步 userInfo（Floating.ca 本身的前缀已由
+    ///    DepthPackageBuilder 在前面加好，这里只处理目录名）。
+    private static func normalizeDescriptorForCurrentOS(
+        in dir: URL,
+        log: @escaping (String) -> Void = { InstallLog.shared.append($0) }
+    ) {
+        let fm = FileManager.default
+        // 1. 清杂文件。
+        if let enumerator = fm.enumerator(at: dir, includingPropertiesForKeys: [.isDirectoryKey], options: []) {
+            var purge: [URL] = []
+            while let entry = enumerator.nextObject() as? URL {
+                let name = entry.lastPathComponent
+                if name == "__MACOSX" {
+                    enumerator.skipDescendants()
+                    purge.append(entry)
+                } else if name == ".DS_Store" || name == ".lock" || name.hasPrefix("._") {
+                    purge.append(entry)
+                }
+            }
+            for target in purge { try? fm.removeItem(at: target) }
+        }
+        // 2. 角色 sidecar + providerInfo（缺了才补）。
+        let roleURL = dir.appendingPathComponent("com.apple.posterkit.role.identifier")
+        if !fm.fileExists(atPath: roleURL.path) {
+            try? Data("PRPosterRoleLockScreen".utf8).write(to: roleURL, options: .atomic)
+            log("规范化：补了角色 sidecar（锁屏）。")
+        }
+        seedDescriptorFileIfMissing("providerInfo.plist",
+                                    to: dir.appendingPathComponent("providerInfo.plist"), log: log)
+        // 3. 每个 versions/<n> 补种子、清 .atx、做 Clownfish 迁移。
+        let versionsRoot = dir.appendingPathComponent("versions", isDirectory: true)
+        guard let versionDirs = try? fm.contentsOfDirectory(
+            at: versionsRoot, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else { return }
+        for verDir in versionDirs
+        where (try? verDir.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            && Int(verDir.lastPathComponent) != nil {
+            let suppDir = verDir.appendingPathComponent("supplements/0", isDirectory: true)
+            seedDescriptorFileIfMissing("homescreenConfiguration.plist",
+                                        to: suppDir.appendingPathComponent("com.apple.posterkit.provider.supplementURL.homescreenConfiguration.plist"), log: log)
+            seedDescriptorFileIfMissing("RuntimeSnapshotMetadata-home.plist",
+                                        to: verDir.appendingPathComponent("RuntimeSnapshotMetadata-home.plist"), log: log)
+            seedDescriptorFileIfMissing("RuntimeSnapshotMetadata-lock.plist",
+                                        to: verDir.appendingPathComponent("RuntimeSnapshotMetadata-lock.plist"), log: log)
+            seedDescriptorFileIfMissing("complicationLayout.plist",
+                                        to: verDir.appendingPathComponent("com.apple.posterkit.provider.instance.complicationLayout.plist"), log: log)
+            seedDescriptorFileIfMissing("titleStyleConfiguration.plist",
+                                        to: verDir.appendingPathComponent("com.apple.posterkit.provider.instance.titleStyleConfiguration.plist"), log: log)
+            let contentsDir = verDir.appendingPathComponent("contents", isDirectory: true)
+            if fm.fileExists(atPath: contentsDir.path) {
+                seedDescriptorFileIfMissing("configurableOptions.plist",
+                                            to: contentsDir.appendingPathComponent(".com.apple.posterkit.provider.contents.configurableOptions.plist"), log: log)
+                seedDescriptorFileIfMissing("otherMetadata.plist",
+                                            to: contentsDir.appendingPathComponent("com.apple.posterkit.provider.contents.otherMetadata.plist"), log: log)
+                migrateClockDepthBundleNames(in: contentsDir, log: log)
+            }
+            // 清掉该版本下所有 .atx 异机快照（iPad / 旧设备上拍的，留着系统
+            // 按异机快照渲染预览会错）。
+            if let snapEnum = fm.enumerator(at: verDir, includingPropertiesForKeys: [.isRegularFileKey], options: []) {
+                for case let fileURL as URL in snapEnum
+                where fileURL.pathExtension.lowercased() == "atx" {
+                    try? fm.removeItem(at: fileURL)
+                }
+            }
+        }
+        // 4. Wallpaper.plist 去硬件锁、修 logicalScreenClass。
+        if let enumerator = fm.enumerator(at: dir, includingPropertiesForKeys: [.isRegularFileKey], options: []) {
+            for case let fileURL as URL in enumerator
+            where fileURL.lastPathComponent == "Wallpaper.plist" {
+                guard var plist = try? PosterBoardPlist.load(contentsOf: fileURL) else { continue }
+                var changed = false
+                if plist["productTypes"] != nil {
+                    plist.removeValue(forKey: "productTypes")
+                    changed = true
+                }
+                let isMotion = (plist["wantsDeviceMotion"] as? Bool) == true
+                let isMarble = (plist["family"] as? String) == "Marble"
+                if !isMotion && !isMarble, (plist["logicalScreenClass"] as? String) == "any" {
+                    let parentName = fileURL.deletingLastPathComponent().lastPathComponent
+                    plist["logicalScreenClass"] = parentName.localizedCaseInsensitiveContains("~ipad")
+                        ? "810w-1080h@2x~ipad" : "390w-844h@3x~iphone"
+                    changed = true
+                }
+                if changed,
+                   let data = try? PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0) {
+                    try? data.write(to: fileURL)
+                }
+            }
+        }
+    }
+
+    /// 种子文件缺了才补一份（Camlo seedFileIfMissing 同款）。
+    private static func seedDescriptorFileIfMissing(
+        _ name: String, to dest: URL,
+        log: @escaping (String) -> Void = { InstallLog.shared.append($0) }
+    ) {
+        let fm = FileManager.default
+        guard !fm.fileExists(atPath: dest.path),
+              let data = DescriptorSeedPlists.data(named: name), !data.isEmpty else { return }
+        try? fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if (try? data.write(to: dest, options: .atomic)) != nil {
+            log("规范化：补了 \(name)。")
+        }
+    }
+
+    /// Clownfish 迁移（照 Camlo `migrateClockDepthBundleNames` 的做法重写）：
+    /// 浮动层有镂空（main.caml 里有 float_lock / float_unlock / cutout_、
+    /// Floating 视图，或浮动 .ca 里超过 2 层、或 assets 里有 cutout 文件）
+    /// 但名字里没 Clownfish 的，.wallpaper 目录名插 _Clownfish，并同步
+    /// userInfo 的 wallpaperRepresentingFileName。Floating.ca 本身的改名
+    /// 已由 DepthPackageBuilder 在前面做完（Clownfish_ 前缀），这里只在
+    /// 清单里的浮动层键还没带标记时才补改一次。
+    private static func migrateClockDepthBundleNames(
+        in contentsDir: URL,
+        log: @escaping (String) -> Void = { InstallLog.shared.append($0) }
+    ) {
+        let fm = FileManager.default
+        guard let children = try? fm.contentsOfDirectory(
+            at: contentsDir, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else { return }
+        let wpDirs = children.filter {
+            $0.pathExtension.lowercased() == "wallpaper"
+                && (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+        }
+        for wpDir in wpDirs {
+            var hasParameterizedFloating = false
+            let plistURL = wpDir.appendingPathComponent("Wallpaper.plist")
+            if fm.fileExists(atPath: plistURL.path),
+               var plist = try? PosterBoardPlist.load(contentsOf: plistURL),
+               var assets = plist["assets"] as? [String: Any],
+               var lockAndHome = assets["lockAndHome"] as? [String: Any] {
+                var mutated = false
+                for key in ["default", "dark"] {
+                    guard var entry = lockAndHome[key] as? [String: Any] else { continue }
+                    let type = (entry["type"] as? String) ?? ""
+                    if type == "ParameterizedCA" || entry["assetFileName"] != nil {
+                        if let assetName = entry["assetFileName"] as? String {
+                            let caURL = wpDir.appendingPathComponent(assetName, isDirectory: true)
+                            if caBundleHasFloatingCutout(at: caURL) { hasParameterizedFloating = true }
+                        }
+                        continue
+                    }
+                    let rawFloating = (entry["floatingAnimationFileNameKey"] as? String)
+                        ?? (entry["floatingAnimationFileName"] as? String)
+                    if let flName = rawFloating, !flName.localizedStandardContains("Clownfish") {
+                        let oldFLURL = wpDir.appendingPathComponent(flName, isDirectory: true)
+                        if fm.fileExists(atPath: oldFLURL.path),
+                           caBundleHasFloatingCutout(at: oldFLURL) {
+                            let newFlName = insertClownfishToken(into: flName)
+                            let newFLURL = wpDir.appendingPathComponent(newFlName, isDirectory: true)
+                            if newFLURL.path != oldFLURL.path {
+                                if fm.fileExists(atPath: newFLURL.path) { try? fm.removeItem(at: newFLURL) }
+                                try? fm.moveItem(at: oldFLURL, to: newFLURL)
+                            }
+                            entry["floatingAnimationFileNameKey"] = newFlName
+                            if entry["floatingAnimationFileName"] != nil {
+                                entry["floatingAnimationFileName"] = newFlName
+                            }
+                            mutated = true
+                            log("规范化：浮动层改名带上 Clownfish（\(flName) → \(newFlName)）。")
+                        }
+                    }
+                    lockAndHome[key] = entry
+                }
+                if mutated {
+                    assets["lockAndHome"] = lockAndHome
+                    plist["assets"] = assets
+                    if let data = try? PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0) {
+                        try? data.write(to: plistURL)
+                    }
+                }
+            }
+            // .wallpaper 目录名也带上 Clownfish（系统切锁屏前查路径里有没有
+            // 这个标记），同步改 userInfo 的代表文件名。
+            let wpName = wpDir.lastPathComponent
+            let newWPName: String?
+            if wpName == "7920.Camlo_3D-390w-844h@3x~iphone.wallpaper" {
+                newWPName = "7920.Camlo_Clownfish_3D-390w-844h@3x~iphone.wallpaper"
+            } else if wpName == "7400.WWDC_2022-390w-844h@3x~iphone.wallpaper" {
+                newWPName = "7400.Clownfish_WWDC_2022-390w-844h@3x~iphone.wallpaper"
+            } else if hasParameterizedFloating && !wpName.localizedStandardContains("Clownfish") {
+                newWPName = insertClownfishToken(into: wpName)
+            } else {
+                newWPName = nil
+            }
+            if let targetName = newWPName, targetName != wpName {
+                let targetDir = contentsDir.appendingPathComponent(targetName, isDirectory: true)
+                if fm.fileExists(atPath: targetDir.path) { try? fm.removeItem(at: targetDir) }
+                if (try? fm.moveItem(at: wpDir, to: targetDir)) != nil {
+                    let userInfoURL = contentsDir.appendingPathComponent("com.apple.posterkit.provider.contents.userInfo")
+                    if fm.fileExists(atPath: userInfoURL.path),
+                       var info = try? PosterBoardPlist.load(contentsOf: userInfoURL) {
+                        let current = (info["wallpaperRepresentingFileName"] as? String) ?? ""
+                        if current == wpName || current.isEmpty || wpDirs.count == 1 {
+                            info["wallpaperRepresentingFileName"] = targetName
+                            if let data = try? PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0) {
+                                try? data.write(to: userInfoURL)
+                            }
+                        }
+                    }
+                    log("规范化：壁纸目录改名带上 Clownfish（\(wpName) → \(targetName)）。")
+                }
+            }
+        }
+    }
+
+    /// 在名字第一个 "-" 前（没有则在最后一个 "." 前）插 _Clownfish
+    ///（Camlo insertClownfishToken 同款）；已带标记的原样返回。
+    private static func insertClownfishToken(into bundleName: String) -> String {
+        if bundleName.localizedStandardContains("Clownfish") { return bundleName }
+        if let dashIdx = bundleName.firstIndex(of: "-") {
+            var copy = bundleName
+            copy.insert(contentsOf: "_Clownfish", at: dashIdx)
+            return copy
+        }
+        if let dotIdx = bundleName.lastIndex(of: ".") {
+            var copy = bundleName
+            copy.insert(contentsOf: "_Clownfish", at: dotIdx)
+            return copy
+        }
+        return "\(bundleName)_Clownfish"
+    }
+
+    /// 这个 .ca 包里有没有浮动镂空（Camlo caBundleHasFloatingCutout 同款）：
+    /// main.caml 里有 float_lock / float_unlock / cutout_、Floating 视图，
+    /// 或浮动 .ca 里超过 2 层、或 assets 里有 cutout 文件。
+    private static func caBundleHasFloatingCutout(at caURL: URL) -> Bool {
+        let fm = FileManager.default
+        let camlURL = caURL.appendingPathComponent("main.caml")
+        if let xml = try? String(contentsOf: camlURL, encoding: .utf8) {
+            if xml.contains("id=\"float_lock\"")
+                || xml.contains("id=\"float_unlock\"")
+                || xml.contains("cutout_")
+                || xml.range(of: "<view\\s+type=\"string\"\\s+value=\"Floating\"\\s*/>",
+                             options: [.regularExpression, .caseInsensitive]) != nil {
+                return true
+            }
+            if let regex = try? NSRegularExpression(pattern: "<CA[A-Za-z]*Layer\\b"),
+               regex.numberOfMatches(in: xml, range: NSRange(location: 0, length: (xml as NSString).length)) > 2,
+               caURL.lastPathComponent.lowercased().contains("floating") {
+                return true
+            }
+        }
+        let assetsDir = caURL.appendingPathComponent("assets", isDirectory: true)
+        if let files = try? fm.contentsOfDirectory(atPath: assetsDir.path),
+           files.contains(where: { $0.localizedCaseInsensitiveContains("cutout") }) {
+            return true
+        }
+        return false
     }
 
     // MARK: - 无配对安装（描述符直写，只写描述符目录）
@@ -610,11 +879,14 @@ enum RestoreTest {
     /// 1. 逃逸进应用数据总目录，翻出壁纸库，读一次表确认是系统正在读的那份库；
     /// 2. 包里的描述符目录（descriptors/<UUID>/，跟描述符直写装好的实物同款形状：
     ///    侧标文件 + providerInfo.plist + versions/1）拷副本，三个身份字段
-    ///    （描述符 sidecar、userInfo、Wallpaper.plist）对齐同一个新数字 id；
+    ///    （描述符 sidecar、userInfo、Wallpaper.plist）对齐同一个新数字 id，
+    ///    再按 Camlo 规范化（补种子 plist、清异机 .atx、去硬件锁、Clownfish 迁移）；
     /// 3. 只写一个目录：Extensions/com.apple.WallpaperKit.CollectionsPoster/
-    ///    descriptors/<新UUID>；
-    /// 4. 完事提示重启手机。不写偏好、不写 configurations、不插行、不写回表、
-    ///    不清 wal/shm——描述符直写日志里数据库只读不写，行是系统重扫时自己补的。
+    ///    descriptors/<全新随机UUID>（重装沿用映射里的 UUID，原位覆盖）；
+    /// 4. 刷新组合拳：清 GalleryCache + 写偏好 + 发 PBF 通知，界面层接着
+    ///    自动注销桌面刷新，不再让用户重启手机。
+    /// 不写 configurations、不插行、不写回表、不清 wal/shm——描述符直写日志里
+    /// 数据库只读不写，行是系统重扫时自己补的。
     /// 旧路（configurations + 插表行 + 写回表）在 27.0 上重启后壁纸消失
     ///（表行还在、图库没有），就是多了那几步：系统重启按描述符重建库，
     /// 只认描述符长出来的形状。这条新路整个按描述符直写做。
@@ -720,8 +992,10 @@ enum RestoreTest {
         }
         defer { if ownsCopyDir { try? fm.removeItem(at: copyDir) } }
 
-        // 3. 只写一个目录：主扩展 descriptors/<新UUID>。同名旧目录先删再写，
-        //    防止上次装剩的半新半旧混在一起。
+        // 3. 只写一个目录：主扩展 descriptors/<全新随机UUID>（V2.7，Camlo/
+        //    Placard 同款：每次装都起全新随机大写 UUID 当文件夹名，不用包里
+        //    原 UUID 直接落盘——原 UUID 可能是原机旧号，系统会认成旧的或冲突。
+        //    同一个包重装时沿用上次记下的 UUID，原位覆盖、不重复建卡）。
         try checkCancelled(isCancelled)
         onProgress?("正在写描述符…", 0.60)
         guard let escapeHandle else {
@@ -732,8 +1006,10 @@ enum RestoreTest {
         let genList = storeGenerations(container: container).map(String.init).joined(separator: "、")
         InstallLog.shared.append("商店代际目录：\(genList.isEmpty ? "（没列到）" : genList)；写入代际：\(writeGeneration)。")
         let storeBase = container + PosterBoard.storePath(writeGeneration)
+        let installUUID = installedUUID(forOriginal: descriptorUUID)
         let targetDir = storeBase
-            + "/Extensions/\(PosterBoard.collectionsExtension)/descriptors/\(descriptorUUID)"
+            + "/Extensions/\(PosterBoard.collectionsExtension)/descriptors/\(installUUID)"
+        InstallLog.shared.append("安装文件夹 UUID：\(installUUID)（包里原 UUID \(descriptorUUID) 只当映射键，不直接落盘）。")
         // 旧目录不清在前面：直写已改成「暂存校验+原子改名」（Drift 同款），
         // 校验过了才整体换新——写失败时老版本原地不动，不会装没装成还把旧的毁了。
         do {
@@ -764,15 +1040,30 @@ enum RestoreTest {
 
         // 回执（Drift 同款）：落一张回执，之后可按回执把这张壁纸从商店里删掉。
         // 包名和构建号一起记，管理页「刷入记录」列表要用。
+        // 回执记安装文件夹 UUID（不是包里原 UUID），删的时候按路径对号。
         InstallReceiptStore.record(InstallReceipt(
-            descriptorUUID: descriptorUUID, targetPath: targetDir,
+            descriptorUUID: installUUID, targetPath: targetDir,
             fileCount: landedStats.fileCount, totalBytes: Int64(landedStats.totalBytes),
             storeVersion: writeGeneration, method: "no-pairing",
             verified: verified, date: Date(),
             packageName: displayName, buildNumber: systemBuildNumber()))
 
-        // 4. 完事：没有配对记录，隧道重启做不了（描述符直写同样跳过），直接报
-        //    重启手机。描述符已落盘，重启后系统重扫自己补行。
+        // 4. 刷新组合拳（V2.7，Camlo refreshGalleryCacheNonDestructive 同款，
+        //    逃逸还开着的时候做）：①清 GalleryCache 内容（只清缓存、不动
+        //    描述符）；②写偏好（PBF 两键 + 26.4+ 持久化键，合并不覆盖）；
+        //    ③发两个 PBF 系统通知。桌面注销那步在界面层装完自动走（WebKit
+        //    注销桌面），这里不调——后台线程贴不了网页视图。
+        onProgress?("正在刷新图库…", 0.85)
+        let galleryCleared = clearGalleryCache(container: container, storeVersion: writeGeneration)
+        let prefsWritten = writePosterBoardPreferencesNoPairing(container: container)
+        let notified = notifyPosterBoardReread()
+        let refreshOK = galleryCleared && prefsWritten
+        report["refresh_combo"] = ["gallery_cache_cleared": galleryCleared,
+                                   "preferences_written": prefsWritten,
+                                   "notified": notified]
+
+        // 完事：描述符已落盘，图库缓存已清、偏好已写，界面层接着自动注销
+        // 桌面刷新，不再让用户重启手机。
         onProgress?("写完了", 1.0)
         report["mode"] = "backup"
         report["method"] = "descriptor-only"
@@ -780,19 +1071,21 @@ enum RestoreTest {
         let summary: String
         if verified {
             summary = "刷入完成：已核验，\(landedStats.fileCount) 个文件都在图库目录里，"
-                + "文件数和字节数都对上了。表和偏好一个字没碰。"
-                + "上滑关掉弹出的海报应用（或刷新桌面）后，锁屏长按进图库看。完整结果见下面日志框."
+                + "文件数和字节数都对上了。"
+                + (refreshOK ? "图库缓存已清、偏好已写。"
+                             : "刷新组合拳没全成（哪步没成见日志），靠桌面刷新兜底。")
+                + "桌面正在刷新，回来后锁屏长按进图库看。完整结果见下面日志框."
         } else {
             summary = "已写入、未确认显示：描述符目录送进了图库目录，但商店目录没有确认收录。"
                 + "先去锁屏图库看一眼；没有的话把日志包发出来排查。完整结果见下面日志框."
         }
         return RestoreOutcome(success: true, summary: summary,
-                              descriptorUUID: descriptorUUID, posterId: nil,
+                              descriptorUUID: installUUID, posterId: nil,
                               extensionID: PosterBoard.collectionsExtension,
                               payloadCount: sourceStats.fileCount,
                               storeSummary: nil,
-                              preferencesWritten: false,
-                              refreshConfirmed: false, rebootNeeded: true,
+                              preferencesWritten: prefsWritten,
+                              refreshConfirmed: refreshOK, rebootNeeded: false,
                               injectResults: [InjectResult(targetParentDir: targetDir,
                                                            ok: true, error: nil)],
                               json: jsonString(report),
@@ -976,7 +1269,7 @@ enum RestoreTest {
     /// 的拷回是通的，老路不动。27.2 beta 3 起直写就堵了，所以 27.2
     /// 及以上都算同一档。
     /// 是不是 iOS 27.2 及以上：27.2 上杀 PosterBoard 回不来（V6 日志已证实
-    /// 表对了也不回来），刷新那步不再杀，改报需重启手机。
+    /// 表对了也不回来），刷新那步不再杀，改报需刷新桌面。
     /// App 就跑在这台手机上，ProcessInfo 读的就是本机系统版本。
     private static var isIOS27_2OrLater: Bool {
         let v = ProcessInfo.processInfo.operatingSystemVersion
@@ -2325,6 +2618,107 @@ enum RestoreTest {
         }
     }
 
+    // MARK: - V2.7 刷新组合拳（Camlo refreshGalleryCacheNonDestructive 同款）
+
+    /// 安装文件夹 UUID 映射键：包里原 UUID → 这次装的文件夹 UUID。
+    private static let installUUIDMapKey = "win97.install.uuidMap"
+
+    /// 这次装的文件夹 UUID：同一个包重装沿用上次记下的（原位覆盖、不重复
+    /// 建卡）；新包起个全新随机大写 UUID（Camlo / Placard 同款）。
+    private static func installedUUID(forOriginal originalUUID: String) -> String {
+        let map = UserDefaults.standard.dictionary(forKey: installUUIDMapKey) as? [String: String] ?? [:]
+        if let existing = map[originalUUID], !existing.isEmpty {
+            return existing
+        }
+        let fresh = UUID().uuidString.uppercased()
+        var updated = map
+        updated[originalUUID] = fresh
+        UserDefaults.standard.set(updated, forKey: installUUIDMapKey)
+        return fresh
+    }
+
+    /// 清 GalleryCache 内容（Camlo 那步的第一步）：只删
+    /// `<商店>/<代际>/GalleryCache` 里面的东西，不动目录本身、不动描述符。
+    /// 逃逸开着时直接用 FileManager 删。目录本来就没有也算清过。
+    private static func clearGalleryCache(container: String, storeVersion: Int) -> Bool {
+        let fm = FileManager.default
+        let cacheURL = URL(fileURLWithPath: container)
+            .appendingPathComponent(PosterBoard.storePath(storeVersion))
+            .appendingPathComponent("GalleryCache")
+        guard fm.fileExists(atPath: cacheURL.path) else {
+            InstallLog.shared.append("刷新：GalleryCache 目录本来就没有，不用清。")
+            return true
+        }
+        guard let items = try? fm.contentsOfDirectory(at: cacheURL, includingPropertiesForKeys: nil) else {
+            InstallLog.shared.append("刷新：GalleryCache 目录列不出来，没清成。")
+            return false
+        }
+        var removed = 0
+        for item in items {
+            if (try? fm.removeItem(at: item)) != nil { removed += 1 }
+        }
+        InstallLog.shared.append("刷新：GalleryCache 清了 \(removed) 项（只清缓存，描述符没动）。")
+        return true
+    }
+
+    /// 无配对写一次 PosterBoard 偏好（Camlo 那步的第二步，逃逸开着时直接
+    /// 用 FileManager 写，不走配对隧道）：先读容器里已有的偏好文件合并
+    /// 不覆盖，再写 PBF_LOCALE_DID_CHANGE=false、PBF_RESET_FILE_PROTECTIONS=true；
+    /// iOS 26.4+ 再补 PersistedPosterContainerBundleIdentifiers
+    ///（+ CollectionsPosterApp）与 CompletedPosterBundleIdentifierMigrations（6 条）。
+    /// 注意：配对路那个 writePosterBoardPreferences 写的是 LOCALE=true，
+    /// 这里照 Camlo 写 false——两条路各走各的，别混。
+    private static func writePosterBoardPreferencesNoPairing(container: String) -> Bool {
+        let fm = FileManager.default
+        let prefsDir = URL(fileURLWithPath: container).appendingPathComponent("Library/Preferences")
+        do {
+            try fm.createDirectory(at: prefsDir, withIntermediateDirectories: true)
+        } catch {
+            InstallLog.shared.append("刷新：偏好目录建不出来，没写偏好（\(error.localizedDescription)）。")
+            return false
+        }
+        let prefsFile = prefsDir.appendingPathComponent("com.apple.PosterBoard.unprotectedUserDefaults.plist")
+        var dict: [String: Any] = [:]
+        if let existing = fm.contents(atPath: prefsFile.path),
+           let parsed = (try? PropertyListSerialization.propertyList(from: existing, options: [], format: nil)) as? [String: Any] {
+            dict = parsed
+        }
+        dict["PBF_LOCALE_DID_CHANGE"] = false
+        dict["PBF_RESET_FILE_PROTECTIONS"] = true
+        if ProcessInfo.processInfo.isOperatingSystemAtLeast(OperatingSystemVersion(majorVersion: 26, minorVersion: 4, patchVersion: 0)) {
+            var persisted = (dict["PersistedPosterContainerBundleIdentifiers"] as? [String]) ?? []
+            if !persisted.contains("com.apple.Posters.CollectionsPosterApp") {
+                persisted.append("com.apple.Posters.CollectionsPosterApp")
+            }
+            dict["PersistedPosterContainerBundleIdentifiers"] = persisted
+            let requiredMigrations = [
+                "com.apple.Posters.UnityPosterApp.ExtragalacticPoster",
+                "com.apple.Posters.WeatherPosterApp.WeatherPoster",
+                "com.apple.Posters.UnityPosterApp.Unity2025Poster",
+                "com.apple.Posters.UnityPosterApp.UnityPosterExtension",
+                "com.apple.Posters.UnityPosterApp.RhizomePoster",
+                "com.apple.Posters.KaleidoscopePosterApp.KaleidoscopePoster",
+            ]
+            var migrations = (dict["CompletedPosterBundleIdentifierMigrations"] as? [String]) ?? []
+            for m in requiredMigrations where !migrations.contains(m) {
+                migrations.append(m)
+            }
+            dict["CompletedPosterBundleIdentifierMigrations"] = migrations
+        }
+        guard let out = try? PropertyListSerialization.data(fromPropertyList: dict, format: .binary, options: 0) else {
+            InstallLog.shared.append("刷新：偏好拼不出来，没写偏好。")
+            return false
+        }
+        do {
+            try out.write(to: prefsFile, options: .atomic)
+        } catch {
+            InstallLog.shared.append("刷新：偏好写盘没成（\(error.localizedDescription)）。")
+            return false
+        }
+        InstallLog.shared.append("刷新：偏好已写（PBF 两键 + 26.4+ 持久化键，已有内容合并保留）。")
+        return true
+    }
+
     // MARK: - 写偏好 + 刷新（照直装同一份内容）
 
     /// 写一次 PosterBoard 偏好（照直装 writePosterBoardPreferences 同一份内容：
@@ -2399,8 +2793,8 @@ enum RestoreTest {
                let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                 result["json"] = obj
                 result["confirmed"] = obj["refresh_confirmed"] as? Bool ?? false
-                // 27.2 上 PosterBoard 杀掉后没回来时 Rust 置 true：只有重启
-                // 手机能让它重读新表，导入页据此给用户一个“重启手机”按钮。
+                // 27.2 上 PosterBoard 杀掉后没回来时 Rust 置 true：导入页
+                // 据此提示用户点「刷新桌面」。
                 result["rebootNeeded"] = obj["reboot_needed"] as? Bool ?? false
             }
             InstallLog.shared.append("restore: 刷新 PosterBoard：\(json)")
@@ -2415,20 +2809,20 @@ enum RestoreTest {
     }
 
     /// 装完刷新（V1.7 对齐 V1.6 的规矩）：配对只认配对刷新这一下，没确认
-    /// 直接报重启手机，不再回落别的刷新。
+    /// 直接报需刷新桌面，不再回落别的刷新。
     /// 27.2 以下：杀 PosterBoard（只动壁纸进程，App 活着）——2026-11-10
     /// 还原日志（restore-20261109-0043）抓到 27.0 杀完 10 轮没回来、
     /// 还自动回落重启桌面，正是卡锁屏图库的那套连招，这条回落删掉。
     /// 27.2 及以上：先重启桌面（27.2 杀 PosterBoard 是死路，V6/V8 已证实），
-    /// 没确认直接报需重启手机，不回落杀 PosterBoard。
+    /// 没确认直接报需刷新桌面，不回落杀 PosterBoard。
     /// 返回的字典跟原来第 8 步同一个形状：confirmed / rebootNeeded / json，
     /// 多一个 method（"springboard" 或 "posterboard"），写进报告和日志。
     private static func refreshAfterInstall(pairingPath: String) -> [String: Any] {
         if pairingPath.isEmpty {
             // 没配对：重启桌面那两条 FFI 都碰不了。文件、表、偏好在前面
-            // 已经全写好了，直接报重启手机兜底，绝不在没配对时碰 FFI。
+            // 已经全写好了，直接报需刷新桌面兜底，绝不在没配对时碰 FFI。
             InstallLog.shared.append(
-                "restore: 没配对记录，装完的自动刷新（重启桌面）做不了；文件、表、偏好都已写好，重启手机后去图库看。")
+                "restore: 没配对记录，装完的自动刷新（重启桌面）做不了；文件、表、偏好都已写好，刷新桌面后去图库看。")
             return ["attempted": false, "confirmed": false, "rebootNeeded": true, "method": "none",
                     "error": "没有配对记录，没做自动刷新"]
         }
@@ -2436,7 +2830,7 @@ enum RestoreTest {
             // V1.7：配对只认配对刷新（杀 PosterBoard）这一下。没确认不再
             // 回落重启桌面——还原日志（restore-20261109-0043）抓到 27.0
             // 杀完 10 轮没回来还接着重启桌面，正是卡锁屏图库的那套连招。
-            // 直接报重启手机：重启是全新读取，文件、表、偏好都已写好。
+            // 直接报需刷新桌面：文件、表、偏好都已写好。
             InstallLog.shared.append("restore: 27.2 以下刷新：先杀 PosterBoard（App 不被带掉）…")
             var pb = posterboardRefresh(pairingPath: pairingPath)
             pb["method"] = "posterboard"
@@ -2444,7 +2838,7 @@ enum RestoreTest {
                 InstallLog.shared.append("restore: PosterBoard 刷新已确认，App 还开着，去图库长按看壁纸。")
                 return pb
             }
-            InstallLog.shared.append("restore: PosterBoard 刷新没确认（\(pb["error"] as? String ?? "见日志")），不再自动重启桌面，直接报重启手机。")
+            InstallLog.shared.append("restore: PosterBoard 刷新没确认（\(pb["error"] as? String ?? "见日志")），不再自动重启桌面，直接报需刷新桌面。")
             pb["rebootNeeded"] = true
             if pb["error"] == nil {
                 pb["error"] = "PosterBoard 刷新没确认"
@@ -2459,8 +2853,8 @@ enum RestoreTest {
             return sb
         }
         // V8：27.2 上杀 PosterBoard 是死路（V6 日志证实表对了也不回来），
-        // 不再杀——直接报需重启手机，导入页弹出“重启手机”按钮。
-        InstallLog.shared.append("restore: SpringBoard 重启没确认（\(sb["error"] as? String ?? "见日志")），27.2 上不杀 PosterBoard，直接报需重启手机。")
+        // 不再杀——直接报需刷新桌面，导入页给「刷新桌面」按钮。
+        InstallLog.shared.append("restore: SpringBoard 重启没确认（\(sb["error"] as? String ?? "见日志")），27.2 上不杀 PosterBoard，直接报需刷新桌面。")
         return ["attempted": true, "confirmed": false, "rebootNeeded": true, "method": "springboard",
                 "error": sb["error"] as? String ?? "SpringBoard 重启没确认"]
     }
@@ -2494,7 +2888,7 @@ enum RestoreTest {
             return "自动刷新完成（\(method)）。"
         }
         if r["rebootNeeded"] as? Bool == true {
-            return "自动刷新没确认：重启手机后生效。"
+            return "自动刷新没确认：点「刷新桌面」后再看。"
         }
         return "自动刷新没确认（\(r["error"] as? String ?? "见日志")）：上滑关掉海报应用后生效。"
     }
@@ -2531,9 +2925,9 @@ enum RestoreTest {
     }
 
     /// 一键重启手机：调 al_device_respring（diagnostics_relay Restart，
-    /// 是整机重启，不是只刷桌面——按钮文案必须写“重启手机”，不许写
-    /// “刷新桌面”或“Respring”；2026-11-01 没打招呼的整机重启就是教训）。
-    /// 只在刷新失败、PosterBoard 杀掉后没回来时给用户亲手点；绝不自动调。
+    /// 是整机重启，不是只刷桌面——2026-11-01 没打招呼的整机重启就是教训）。
+    /// V2.7 起界面已无重启手机按钮，此函数留作诊断工具，不自动调；
+    /// 哪天再接按钮，文案必须写“重启手机”，不许写“刷新桌面”或“Respring”。
     /// FFI 会阻塞，放后台线程跑；返回 true 只代表指令发出去了，不代表
     /// 手机已经重启完。
     static func deviceReboot(pairingPath: String) async -> Bool {

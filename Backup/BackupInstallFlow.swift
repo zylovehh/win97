@@ -30,7 +30,7 @@ enum BackupInstallFlow {
         let injectResults: [InjectResult]
         /// V1.36（Drift 同款）：写后核验结果，原样从 RestoreOutcome 带给界面。
         let verified: Bool?
-        /// 刷新没确认才要重启手机。
+        /// 刷新没确认才要再刷新桌面（V2.7 起不再让用户重启手机）。
         var needsReboot: Bool { !refreshConfirmed }
     }
 
