@@ -1403,7 +1403,8 @@ private struct AddWallpaperView: View {
                     compressNote = compressNote.isEmpty ? videoNote : compressNote + " " + videoNote
                     uploadVideoData = compressed
                 }
-                let videoName = "\(id)-preview.mp4"
+                // 预览视频每次用唯一新名：免得删了重传同名时撞上缓存，目录里一直显示旧视频。
+                let videoName = CatalogStore.previewVideoName(for: id)
                 try await store.uploadWallpaperFile(name: videoName, data: uploadVideoData, token: token,
                                                     progress: { value in Task { @MainActor in uploadProgress = value } })
                 previewURL = CatalogStore.wallpapersRawBase + videoName
@@ -1568,7 +1569,7 @@ private struct ReplaceVideoView: View {
                     .font(.headline)
                 Text(item.previewURL.isEmpty
                      ? "这张现在没有预览视频，选一个传上去，卡片就播视频当封面。"
-                     : "选一个新视频传上去，旧的预览文件会被同名覆盖。")
+                     : "选一个新视频传上去，会自动用新文件名保存，旧的预览文件自动删掉，卡片立刻显示新视频。")
                     .font(.caption).foregroundStyle(.secondary)
                 PhotosPicker(selection: Binding(
                     get: { videoItem },
@@ -1644,7 +1645,8 @@ private struct ReplaceVideoView: View {
         }
     }
 
-    /// 换视频流程：传视频（同名覆盖）→ 改这条的预览和封面地址 → 推表。
+    /// 换视频流程：传视频（每次生成唯一新名，绕开缓存）→ 改这条的预览和封面地址 → 推表
+    /// → 删旧预览文件 → 清旧 URL 本地缓存。换完卡片立刻显示新视频。
     @MainActor
     private func replace() async {
         guard let token = accountStore.loadToken() else {
@@ -1661,7 +1663,9 @@ private struct ReplaceVideoView: View {
             if let compressed = await VideoCompressor.compressToPreview(videoData) {
                 uploadVideoData = compressed
             }
-            let videoName = "\(item.id)-preview.mp4"
+            // 每次换视频都用唯一新名：同名覆盖会被 CDN 和手机缓存认成旧文件，
+            // 新视频传上去目录里还一直显示旧的；新名直接绕开缓存，不用手动改名。
+            let videoName = CatalogStore.previewVideoName(for: item.id)
             try await store.uploadWallpaperFile(name: videoName, data: uploadVideoData, token: token,
                                                 progress: { value in Task { @MainActor in uploadProgress = value } })
             let videoURL = CatalogStore.wallpapersRawBase + videoName
@@ -1672,6 +1676,13 @@ private struct ReplaceVideoView: View {
                 packageURL: live.packageURL, pinned: live.pinned, downloads: live.downloads, device: live.device)
             let newItems = store.items.map { $0.id == item.id ? updated : $0 }
             try await store.pushCatalog(newItems, token: token)
+            // 新文件已传上去、目录表已指向新名，再删旧的预览文件（只删这张的
+            // 预览视频，.tendies 包不动；删错了可从 git 历史恢复）。
+            await store.deleteOldPreviewVideos(id: item.id, keepName: videoName, token: token)
+            // 清掉旧 URL 的本地缓存，卡片立刻显示新视频，不用等缓存过期。
+            for oldURLString in [live.thumbnailURL, live.previewURL] where oldURLString != videoURL {
+                CatalogStore.clearLocalCache(for: oldURLString)
+            }
             onDone()
             dismiss()
         } catch {
@@ -2645,7 +2656,8 @@ struct BatchImportView: View {
                 var thumbnailURL = ""
                 var previewURL = ""
                 if let video = uploadVideo {
-                    let videoName = "\(id)-preview.mp4"
+                    // 预览视频每次用唯一新名，免得撞缓存。
+                    let videoName = CatalogStore.previewVideoName(for: id)
                     try await store.uploadWallpaperFile(name: videoName, data: video, token: token,
                                                         progress: { value in Task { @MainActor in uploadProgress = value } })
                     previewURL = CatalogStore.wallpapersRawBase + videoName

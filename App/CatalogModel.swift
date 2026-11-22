@@ -514,6 +514,24 @@ final class CatalogStore: ObservableObject {
         return (doc.items, dict["sha"] as? String, Self.readMinAppVersion(from: raw))
     }
 
+    /// 预览视频文件名：每次换视频都生成唯一新名（id + 秒级时间戳），
+    /// 文件名要好认，不用 UUID。同名覆盖会被 CDN 和手机缓存认成同一个文件，
+    /// 新视频传上去目录里还一直显示旧的；新名直接绕开缓存。
+    static func previewVideoName(for id: String) -> String {
+        "\(id)-preview-\(Int(Date().timeIntervalSince1970)).mp4"
+    }
+
+    /// 清掉某个 URL 的本地缓存（换视频后用）：新文件名已经绕开缓存，
+    /// 这里再清掉旧 URL 的那份，卡片立刻显示新视频，不用等缓存过期。
+    static func clearLocalCache(for urlString: String) {
+        guard let url = URL(string: urlString) else { return }
+        URLCache.shared.removeCachedResponse(for: URLRequest(url: url))
+        // 封面播不起来时会走 raw 直链当备用：那条也清掉。
+        if let rawURL = rawGitHubURL(from: urlString) {
+            URLCache.shared.removeCachedResponse(for: URLRequest(url: rawURL))
+        }
+    }
+
     /// 上传一个壁纸文件到仓库 wallpapers/ 目录（已有同名就覆盖，重试不报错）。
     /// progress：上传进度回调（0~1，可能从非主线程调用），nil 表示不关心进度。
     func uploadWallpaperFile(name: String, data: Data, token: String,
@@ -523,6 +541,29 @@ final class CatalogStore: ObservableObject {
             message: "Upload \(name) via app", token: token, progress: progress)
         // 清掉该文件的 CDN 缓存（目录本身的缓存由随后的 pushCatalog 统一清），后台悄悄清，不等它。
         Task { await purgeCDNCache(paths: ["\(Self.wallpapersDir)/\(name)"]) }
+    }
+
+    /// 删掉某张壁纸的旧预览视频（换视频后清理）：只删 `<id>-preview*.mp4`，
+    /// .tendies 包和其他文件一律不动。删错了可从 git 历史恢复。
+    /// 调用时机：新视频已传上去、目录表已指向新名之后；删除是 best effort，
+    /// 删不掉不报错（新视频已生效，旧文件只占一点仓库空间）。
+    func deleteOldPreviewVideos(id: String, keepName: String, token: String) async {
+        guard let entries = try? await githubListDirectory(path: Self.wallpapersDir, token: token) else { return }
+        var deletedPaths: [String] = []
+        for entry in entries
+        where entry.name.hasPrefix("\(id)-preview") && entry.name.hasSuffix(".mp4") && entry.name != keepName {
+            let path = "\(Self.wallpapersDir)/\(entry.name)"
+            do {
+                try await githubDelete(path: path, sha: entry.sha,
+                                       message: "Delete old preview \(entry.name) via app", token: token)
+                deletedPaths.append(path)
+            } catch {
+                continue
+            }
+        }
+        if !deletedPaths.isEmpty {
+            await purgeCDNCache(paths: deletedPaths)
+        }
     }
 
     /// 让 CDN 缓存失效（best effort）：逐条请求 purge 接口，失败静默忽略，
@@ -557,6 +598,39 @@ final class CatalogStore: ObservableObject {
               let sha = dict["sha"] as? String
         else { throw PushError.http(status) }
         return sha
+    }
+
+    /// 删仓库里某个文件（DELETE contents 接口）：要带文件的 sha。
+    private func githubDelete(path: String, sha: String, message: String, token: String) async throws {
+        var request = URLRequest(url: githubContentsURL(path: path))
+        request.httpMethod = "DELETE"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("Win97", forHTTPHeaderField: "User-Agent")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["message": message, "sha": sha])
+        let (_, response) = try await URLSession.shared.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard status == 200 else { throw PushError.http(status) }
+    }
+
+    /// 列仓库里某个目录下的文件（名字 + sha），目录不存在返回空。
+    private func githubListDirectory(path: String, token: String) async throws -> [(name: String, sha: String)] {
+        var request = URLRequest(url: githubContentsURL(path: path))
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("Win97", forHTTPHeaderField: "User-Agent")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        if status == 404 { return [] }
+        guard status == 200 else { throw PushError.http(status) }
+        guard let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            throw PushError.http(status)
+        }
+        return arr.compactMap { dict in
+            guard let name = dict["name"] as? String, let sha = dict["sha"] as? String else { return nil }
+            return (name, sha)
+        }
     }
 
     /// 写（新建或覆盖）仓库里某个文件：内容先转 base64；已有文件要带上它的 sha 才能覆盖。
