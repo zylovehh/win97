@@ -329,12 +329,15 @@ public enum TendiesPackage {
             var identifier: Int?
             var family: String?
             var name: String?
-            if let plistData = try? zip.readEntry(path, in: plain),
-               var format = PropertyListSerialization.PropertyListFormat.xml,
-               let plist = try? PropertyListSerialization.propertyList(from: plistData, format: &format) as? [String: Any] {
-                identifier = plist["identifier"] as? Int
-                family = plist["family"] as? String
-                name = plist["name"] as? String
+            if let plistData = try? zip.readEntry(path, in: plain) {
+                // format 必须先在外面声明成 var 再传 inout，不能塞进 if-let 的条件链里
+                //（条件链里只允许 Optional 绑定和 Bool 条件，非 Optional 的 var 会编不过）。
+                var format = PropertyListSerialization.PropertyListFormat.xml
+                if let plist = try? PropertyListSerialization.propertyList(from: plistData, format: &format) as? [String: Any] {
+                    identifier = plist["identifier"] as? Int
+                    family = plist["family"] as? String
+                    name = plist["name"] as? String
+                }
             }
             out.append(ContainerWallpaper(
                 descriptorUUID: found.uuid,
