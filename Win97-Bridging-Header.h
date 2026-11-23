@@ -9,3 +9,8 @@
 // WQCache/WQAccess.h）。只声明这一个函数，不整头引 WQAccess.h，免得它里面
 // 大量 C 声明进 Swift。V2.9.2 清理页“扫描日志”区用。
 NSString *wq_log_text(void);
+
+// wq_full_scan_ui_install：注册完整扫描的确认回调 + 进度窗（实现在
+// WQCache/WQFullScanUI.m）。V2.9.3：没注册时完整扫描永远启动不了
+// （V2.9.2 扫描日志定下的根因），清理页出现时调一次。
+#import "WQCache/WQFullScanUI.h"

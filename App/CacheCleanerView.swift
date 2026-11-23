@@ -493,7 +493,13 @@ struct CacheCleanerView: View {
         .background(AppBackgroundView())
         .navigationTitle("缓存清理")
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear { model.startIfNeeded() }
+        .onAppear {
+            // V2.9.3：先注册完整扫描的确认回调 + 进度窗，再开始扫描——
+            // 没注册时完整扫描永远启动不了（V2.9.2 扫描日志定下的根因）。
+            // wq_full_scan_ui_install 里 dispatch_once，只注册一次。
+            wq_full_scan_ui_install()
+            model.startIfNeeded()
+        }
         .alert("清理缓存？", isPresented: $model.showConfirm) {
             Button("取消", role: .cancel) {}
             Button("清理", role: .destructive) { model.startClean() }
