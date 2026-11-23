@@ -287,9 +287,9 @@ final class CatalogStore: ObservableObject {
                 // 目录只给最新版：表里写了最低版本，低于它的 App 不显示目录。
                 let min = Self.readMinAppVersion(from: data)
                 minAppVersion = min
-                if let min, UpdateChecker.localVersionNumber() < min {
+                if let min, UpdateChecker.versionCode(UpdateChecker.localVersionNumber()) < UpdateChecker.versionCode(min) {
                     items = []
-                    errorMessage = "目录只给最新版：请先把 App 更新到 V\(min) 再看目录。"
+                    errorMessage = "目录只给最新版：请先把 App 更新到 V\(UpdateChecker.versionString(min)) 再看目录。"
                     return
                 }
                 items = Self.sortedItems(doc.items)

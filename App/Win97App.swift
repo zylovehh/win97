@@ -311,6 +311,22 @@ enum UpdateChecker {
         return major + minor / 10 + patch / 1000
     }
 
+    /// 版本号转整数码：2.902→2902。Double 直接比会出浮点误差
+    /// （本地 2 + 9/10 + 2/1000 算出来是 2.9019999999999997，比表里的
+    /// 2.902 小一个最小单位，目录门会把 V2.9.2 自己拦在外面），先 round
+    /// 再比整数码就没这个毛病。
+    static func versionCode(_ number: Double) -> Int { Int(round(number * 1000)) }
+
+    /// 版本号转显示串：2.902→"2.9.2"，2.9→"2.9"。补丁一定要用 round，
+    /// 不能直接 Int 截断（2.902 - 2.9 = 0.0019999…，截断会得 1）。
+    static func versionString(_ number: Double) -> String {
+        let major = Int(number)
+        let minor = Int(round((number - Double(major)) * 10))
+        let patch = Int(round((number - Double(major) - Double(minor) / 10) * 1000))
+        if patch == 0 { return "\(major).\(minor)" }
+        return "\(major).\(minor).\(patch)"
+    }
+
     /// 拉 version.json，比版本号。几条线路都拉不到就报 failed（调用方决定要不要提示）。
     /// 每条线路 15 秒超时 + 时间戳破缓存（目录拉取早有了，查更新这次也补上，
     /// 不然 CDN 缓存的旧 version.json 会让新版查不出来）。
@@ -325,7 +341,9 @@ enum UpdateChecker {
                 request.timeoutInterval = 15
                 let (data, _) = try await URLSession.shared.data(for: request)
                 let remote = try JSONDecoder().decode(RemoteVersion.self, from: data)
-                if remote.number > local {
+                // 整数码比较：Double 直接比有浮点误差（V2.9.2 的本地
+                // 2.9019999… < 远端 2.902，会误报有新版）。
+                if UpdateChecker.versionCode(remote.number) > UpdateChecker.versionCode(local) {
                     return .available(remote)
                 }
                 return .upToDate
