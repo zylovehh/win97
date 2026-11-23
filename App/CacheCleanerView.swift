@@ -80,7 +80,9 @@ enum OwnCache {
     }
 
     /// 目录数据：用已知目录地址去 URLCache 里探 catalog.json 的大小。
-    static func catalogBytes() -> UInt64 {
+    /// CatalogStore 是 @MainActor，catalogHosts/catalogPath 只能在主线程读，
+    /// 所以这两个静态方法也标 @MainActor（调用处在 Task.detached 里要走 MainActor.run）。
+    @MainActor static func catalogBytes() -> UInt64 {
         var total: UInt64 = 0
         for host in CatalogStore.catalogHosts {
             guard let url = URL(string: host + "/" + CatalogStore.catalogPath) else { continue }
@@ -91,7 +93,7 @@ enum OwnCache {
         return total
     }
 
-    static func clearCatalogCache() {
+    @MainActor static func clearCatalogCache() {
         for host in CatalogStore.catalogHosts {
             guard let url = URL(string: host + "/" + CatalogStore.catalogPath) else { continue }
             URLCache.shared.removeCachedResponse(for: URLRequest(url: url))
@@ -154,7 +156,7 @@ final class CacheCleanerModel: NSObject, ObservableObject, WQCacheEngineDelegate
     /// 自己的 App 行（引擎那行，或引擎没扫出来时用四项拼的合成行）。
     var ownTotalBytes: UInt64 { ownItems.reduce(0) { $0 + $1.bytes } }
     var ownSelectedBytes: UInt64 { ownItems.filter(\.selected).reduce(0) { $0 + $1.bytes } }
-    var ownAnySelected: Bool { ownItems.contains(\.selected) }
+    var ownAnySelected: Bool { ownItems.contains(where: \.selected) }
 
     /// 除自己外的引擎行。
     var otherItems: [WQCacheItem] { items.filter { $0.bundleID != ownBundleID } }
@@ -207,7 +209,7 @@ final class CacheCleanerModel: NSObject, ObservableObject, WQCacheEngineDelegate
     /// 量自己四项（在后台跑，量完回主线程写）。
     func measureOwnItems() async {
         let measured = await Task.detached {
-            let catalog = OwnCache.catalogBytes()
+            let catalog = await MainActor.run { OwnCache.catalogBytes() }
             let video = OwnCache.videoBytes(catalogBytes: catalog)
             let cover = ThumbnailDiskCache.shared.totalBytes()
             let tmp = OwnCache.directorySize(URL(fileURLWithPath: NSTemporaryDirectory()))
