@@ -3111,7 +3111,12 @@ static NSDictionary<NSString *, NSArray<NSString *> *> *wq_run_shared_scan(fsid_
     NSString *lsSummary = nil;
     NSDictionary<NSString *, NSArray<NSString *> *> *lsListed = wq_lsapi_list_containers(roots, &lsSummary);
     wq_log(@"scan: %@", lsSummary);
-    if (!wq_system_areas_reachable() && [lsListed[roots[0]] count] > 1) {
+    // V2.9.1：iOS 27 上也用 LS 列表——27.0.1 上容器管理器只返回本 App、
+    // inode 扫描看不到别的 App，LS 列表是唯一能列出所有 App 的路。
+    // 原条件只在 iOS 26 用（wq_system_areas_reachable 在 27 上为 true，
+    // LS 列表算出来就被丢掉，扫描结果 0 个 App）。守护进程容器 LS 列
+    // 不出，沿用原有逻辑留空，不报错。
+    if ([lsListed[roots[0]] count] > 1) {
         // The API doesn't list daemon containers; those still need the scan
         // on releases where it works, so only skip it when apps are covered.
         NSMutableDictionary *merged = [lsListed mutableCopy];

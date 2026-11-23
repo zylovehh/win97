@@ -289,7 +289,9 @@ enum UpdateChecker {
         return urls
     }
 
-    /// 从 BuildInfo.tag（比如 "V1.5 正式版"）里抠出版本号数字（1.5）。
+    /// 从 BuildInfo.tag（比如 "V1.5 正式版"、"V2.9.1"）里抠出版本号数字。
+    /// 三段按段解析：主 + 次/10 + 补丁/1000（"V2.9"→2.9、"V2.9.1"→2.901），
+    /// Double("2.9.1") 是 nil，不能直接转。
     static func localVersionNumber() -> Double {
         let tag = BuildInfo.tag
         // 找 "V" 后面的数字，一直读到空格或非数字/点为止。
@@ -302,7 +304,11 @@ enum UpdateChecker {
                 break
             }
         }
-        return Double(numStr) ?? 0
+        let parts = numStr.split(separator: ".").compactMap { Double($0) }
+        guard let major = parts.first else { return 0 }
+        let minor = parts.count > 1 ? parts[1] : 0
+        let patch = parts.count > 2 ? parts[2] : 0
+        return major + minor / 10 + patch / 1000
     }
 
     /// 拉 version.json，比版本号。几条线路都拉不到就报 failed（调用方决定要不要提示）。

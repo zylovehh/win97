@@ -136,7 +136,9 @@ struct InstallView: View {
         installLog = InstallLog.shared.tail(200)
     }
 
-    /// 隧道结果：读回核对按通道可信度分话术，不把话说满。
+    /// 隧道结果（V2.9.1）：读回核对按通道可信度分话术，不把话说满。
+    /// 装完先唤出海报应用（V2.6 的做法，V2.7 误删后恢复）；叫不动才按
+    /// 现在的做法——刷新没确认就注销桌面兜底。
     private func tunnelResult(_ report: InstallReport) -> String {
         var text = "安装完成（隧道路），描述符 UUID：\(report.descriptorUUID)。"
         if report.verifyResults.contains(where: { $0.channelUnavailable }) {
@@ -146,26 +148,72 @@ struct InstallView: View {
         } else {
             text += "读回核对没过：描述符缺了东西——把日志发来看。"
         }
+        // V2.9.1：先唤出海报应用（V2.6 的做法）。成了就报卡片弹出来了。
+        if PosterBoardLauncher.launch() {
+            text += "海报界面拉起来了——上滑关掉卡片，锁屏长按进图库查看。"
+            return text
+        }
+        InstallLog.shared.append("restore: 隧道路装完自动弹卡片，私有接口没叫动，退 posterboard:// 暗号。")
+        // 暗号是异步回调，tunnelResult 同步返回字符串等不起回调——直接发，
+        // 没弹出来话术也留了后路（锁屏长按进图库看），不把话说满。
+        if let posterBoardURL = URL(string: "posterboard://") {
+            UIApplication.shared.open(posterBoardURL)
+            text += "海报应用没叫动，已发暗号拉起——卡片弹出来就上滑关掉它，没弹出来锁屏长按进图库看。"
+            return text
+        }
+        // 暗号拼不出来（理论上不会）：按刷新结论兜底。
         if report.refresh?.confirmed != true {
-            // V2.7：刷新没确认就自动注销桌面，不再让用户重启手机。
             DesktopRestart.trigger()
             text += "配对刷新没确认，已自动注销桌面，回来后去锁屏图库看。"
         }
         return text
     }
 
-    /// 直刷结果（V2.7）：装完自动注销桌面（WebKit 注销桌面）刷新，不再走
-    /// “拉海报应用”那套（会被注销桌面杀掉），也不再让用户重启手机。
-    /// 刷新已确认就不用再刷，直接让用户去图库看。
+    /// 直刷结果（V2.9.1）：恢复 V2.6 的自动弹卡片——装完先把海报应用唤出来，
+    /// 卡片弹出来用户直接看。V2.7 把这步换成只注销桌面，等于把原有功能删了，
+    /// 用户 2026-11-23 明确说以后不许删原有功能。注销桌面只作兜底：海报应用
+    /// 叫不动、暗号也打不开、刷新又没确认时才走。
     private func directResult(_ report: InstallReport) async {
         let uuid = report.descriptorUUID
         let verify = report.backupSummary ?? ""
-        if report.refresh?.confirmed == true {
-            result = "安装完成（直刷路），描述符 UUID：\(uuid)。\(verify)锁屏长按进图库查看。"
-        } else {
-            DesktopRestart.trigger()
-            result = "安装完成（直刷路），描述符 UUID：\(uuid)。\(verify)桌面正在刷新，回来后锁屏长按进图库查看。"
+        // 先唤出海报应用（V2.6 的做法）：成了就报卡片弹出来了。
+        if PosterBoardLauncher.launch() {
+            result = "安装完成（直刷路），描述符 UUID：\(uuid)。\(verify)海报界面拉起来了——上滑关掉卡片，锁屏长按进图库查看。"
+            installLog = InstallLog.shared.tail(200)
+            return
         }
+        InstallLog.shared.append("restore: 装完自动弹卡片，私有接口没叫动，退 posterboard:// 暗号。")
+        guard let posterBoardURL = URL(string: "posterboard://") else {
+            // 暗号拼不出来（理论上不会）：按刷新结论兜底。
+            if report.refresh?.confirmed == true {
+                result = "安装完成（直刷路），描述符 UUID：\(uuid)。\(verify)锁屏长按进图库查看。"
+            } else {
+                DesktopRestart.trigger()
+                result = "安装完成（直刷路），描述符 UUID：\(uuid)。\(verify)桌面正在刷新，回来后锁屏长按进图库查看。"
+            }
+            installLog = InstallLog.shared.tail(200)
+            return
+        }
+        // posterboard:// 暗号是异步回调，result 在回调里改；兜底的注销桌面
+        // 也放回调里判（暗号没叫动、刷新没确认时才走）。
+        UIApplication.shared.open(posterBoardURL) { ok in
+            DispatchQueue.main.async {
+                if ok {
+                    self.result = "安装完成（直刷路），描述符 UUID：\(uuid)。\(verify)海报应用马上弹出来——上滑关掉它，锁屏长按进图库查看。"
+                } else {
+                    InstallLog.shared.append("restore: 装完自动弹卡片，暗号也没叫动。")
+                    if report.refresh?.confirmed == true {
+                        self.result = "安装完成（直刷路），描述符 UUID：\(uuid)。\(verify)海报没叫动——锁屏长按进图库看看装没装上。"
+                    } else {
+                        DesktopRestart.trigger()
+                        self.result = "安装完成（直刷路），描述符 UUID：\(uuid)。\(verify)海报没叫动，已自动注销桌面，回来后锁屏长按进图库查看。"
+                    }
+                }
+                self.installLog = InstallLog.shared.tail(200)
+            }
+        }
+        // 暗号回调回来前先给一句话，别让界面空着；回调里会再改一次。
+        result = "安装完成（直刷路），描述符 UUID：\(uuid)。\(verify)正在拉起海报界面…"
         installLog = InstallLog.shared.tail(200)
     }
 
