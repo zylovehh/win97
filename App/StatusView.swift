@@ -78,6 +78,8 @@ struct QQGroupBar: View {
 struct StatusView: View {
     @EnvironmentObject private var state: AppState
     @Environment(\.openURL) private var openURL
+    /// 主题（V2.9）：主题卡副标题要跟着当前主题名变。
+    @ObservedObject private var theme = ThemeManager.shared
     // 内置 VPN 实例放主页面持有，二级页只观察，避免每次进二级页重建导致状态不对。
     @StateObject private var vpn = VPNManager()
     @State private var host = "10.7.0.1"
@@ -148,6 +150,22 @@ struct StatusView: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("已安装记录").font(.headline)
                                 Text(state.installHistory.isEmpty ? "还没有成功安装的记录" : "共 \(state.installHistory.count) 条").font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right").foregroundStyle(.secondary).font(.caption)
+                        }
+                        .padding()
+                        .background(Color.black.opacity(0.35), in: RoundedRectangle(cornerRadius: 16))
+                        .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.1), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    // 主题（V2.9）：调色板卡片，副标题显示当前主题名，点进主题设置页。
+                    NavigationLink(destination: ThemeSettingsView()) {
+                        HStack {
+                            Image(systemName: "paintpalette").foregroundStyle(.blue).font(.title3)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("主题").font(.headline)
+                                Text("当前：\(theme.themeID.displayName)").font(.caption).foregroundStyle(.secondary)
                             }
                             Spacer()
                             Image(systemName: "chevron.right").foregroundStyle(.secondary).font(.caption)

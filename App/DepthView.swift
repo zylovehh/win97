@@ -94,6 +94,22 @@ struct DepthView: View {
                         }
                     }
                 }
+                // 清理缓存（V2.9）：所有人可见，不走管理员门控。
+                NavigationLink(destination: CacheCleanerView()) {
+                    HStack {
+                        Image(systemName: "trash").foregroundStyle(.blue).font(.title3)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("清理缓存").font(.headline)
+                            Text("清理各 App 的缓存和临时文件").font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right").foregroundStyle(.secondary).font(.caption)
+                    }
+                    .padding()
+                    .background(Color.black.opacity(0.35), in: RoundedRectangle(cornerRadius: 16))
+                    .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.1), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
                 Spacer()
                 // QQ 群：企鹅图标 + “壁纸交流群”流光字，点整条都进群。
                 QQGroupBar()

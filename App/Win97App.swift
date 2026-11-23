@@ -77,8 +77,13 @@ struct AppBackgroundView: View {
         return UIImage(data: data)
     }()
 
+    @ObservedObject private var theme = ThemeManager.shared
+
     var body: some View {
-        if let image = Self.backgroundImage {
+        if theme.themeID != .default {
+            // 非默认主题：主题渐变 + 光晕（ThemeBackgroundView 里画）。
+            ThemeBackgroundView()
+        } else if let image = Self.backgroundImage {
             Image(uiImage: image)
                 .resizable()
                 .scaledToFill()

@@ -175,6 +175,32 @@ final class ThumbnailDiskCache {
         }
     }
 
+    /// 当前占了多少字节（清理页量“封面图”那项用）。
+    func totalBytes() -> UInt64 {
+        queue.sync {
+            guard let files = try? FileManager.default.contentsOfDirectory(
+                at: dir, includingPropertiesForKeys: [.fileSizeKey]) else { return 0 }
+            var total: UInt64 = 0
+            for url in files {
+                if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+                    total += UInt64(size)
+                }
+            }
+            return total
+        }
+    }
+
+    /// 清掉全部封面缩略图（清理页清“封面图”那项用；目录本身不动）。
+    /// 同步清：清理完立刻重量的数才准（目录最多 50MB，清起来很快）。
+    func clear() {
+        queue.sync {
+            guard let files = try? FileManager.default.contentsOfDirectory(at: self.dir, includingPropertiesForKeys: nil) else { return }
+            for url in files {
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
+    }
+
     /// 写缓存并清超量：写完后按修改时间从旧到新删，直到 50MB 以内。
     func store(_ data: Data, for urlString: String) {
         queue.async {
@@ -485,6 +511,10 @@ struct CatalogView: View {
             .onAppear {
                 if let request = state.sharedUploadRequest { handleShareUpload(request) }
             }
+            // 缓存清理完了（V2.9）：重新拉目录（清理会把缓存的目录表和视频清掉）。
+            .onReceive(NotificationCenter.default.publisher(for: .win97CacheCleaned)) { _ in
+                Task { await store.fetch() }
+            }
             .sheet(item: $videoReplaceItem) { item in
                 ReplaceVideoView(store: store, item: item, onDone: {
                     videoReplaceItem = nil
@@ -771,6 +801,8 @@ private struct CatalogCard: View {
     let onTogglePin: () -> Void
     /// 卡片里点播状态：默认只显示静态封面，点了播放键才播视频。
     @State private var playingVideo = false
+    /// 主题（V2.9）：彩色卡片开时，卡片描边用主题色。
+    @ObservedObject private var theme = ThemeManager.shared
 
     /// 封面视频：封面地址本身是视频就用它；否则预览是视频的也直接拿预览当封面播。
     private var coverVideoURL: URL? {
@@ -889,6 +921,13 @@ private struct CatalogCard: View {
             }
             .padding(10)
             .fontDesign(.rounded)
+        }
+        .overlay {
+            // 彩色卡片（V2.9）：开时卡片描边用主题色轮换，固定了卡片颜色就用它。
+            if theme.colorfulCards {
+                RoundedRectangle(cornerRadius: 16)
+                    .stroke(theme.cardGradient(forItemID: item.id), lineWidth: 2)
+            }
         }
     }
 
