@@ -1,13 +1,13 @@
 {
-  "tag": "V2.9",
-  "number": 2.9,
+  "tag": "V2.9.2",
+  "number": 2.902,
   "viewer": {
     "tag": "V1.4",
     "number": 1.4
   },
   "installer": {
-    "tag": "V2.9",
-    "number": 2.9
+    "tag": "V2.9.2",
+    "number": 2.902
   },
   "editor": {
     "tag": "V1.7",
