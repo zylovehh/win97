@@ -1411,7 +1411,12 @@ private struct ImportDetailView: View {
                 } else {
                     note += "：读回核对没过，描述符缺了东西——把日志发来看。"
                 }
-                if report.refresh?.confirmed != true {
+                // V2.9.2：装完先拉海报应用，卡片弹出来（V2.9.1 改错了文件，
+                // InstallView 是死页面，弹卡片逻辑一次也没跑过）。叫不动再按
+                // 原来的做法：刷新没确认就注销桌面。
+                if PosterBoardLauncher.launch() {
+                    note += "海报界面拉起来了——上滑关掉卡片，锁屏长按进图库查看。"
+                } else if report.refresh?.confirmed != true {
                     // 隧道刷新没确认：V2.7 起自动注销桌面（WebKit 注销桌面），
                     // 不再让用户重启手机。
                     InstallLog.shared.append("restore: 隧道装完刷新没确认，自动注销桌面。")
@@ -1423,17 +1428,40 @@ private struct ImportDetailView: View {
             }
             // 直刷统一一条路：成功只写四个字，载荷数、描述符这些长日志留在日志框里。
             installResult = "安装成功（直刷）"
-            // 直刷装完：发通知，再自动注销桌面（WebKit 注销桌面）——
-            // V2.7 起不再走“拉海报应用”那套（会被注销桌面杀掉），也不再让
-            // 用户重启手机。
-            if !(report.refresh?.confirmed ?? false) {
-                let sent = await Task.detached(priority: .userInitiated) {
-                    RestoreTest.notifyPosterBoardReread()
-                }.value
-                InstallLog.shared.append("restore: 直刷装完刷新没确认，自动注销桌面（通知已发：\(sent)）。")
-                DesktopRestart.trigger()
-                installResult = "安装成功（直刷）：桌面正在刷新，回来后锁屏长按进图库查看。"
-                installLogText = InstallLog.shared.tail(60)
+            // V2.9.2：装完先拉海报应用，卡片弹出来（V2.9.1 改错了文件，
+            // InstallView 是死页面，弹卡片逻辑一次也没跑过）。叫不动退
+            // posterboard:// 暗号；暗号也不行、刷新又没确认，才注销桌面兜底
+            // ——注销桌面会把刚拉起来的海报应用杀掉，所以只在拉不起来时才走。
+            // 刷新已确认时不注销桌面，只报卡片弹没弹出来。
+            if PosterBoardLauncher.launch() {
+                installResult = "安装成功（直刷）：海报界面拉起来了——上滑关掉卡片，锁屏长按进图库查看。"
+            } else if let posterBoardURL = URL(string: "posterboard://") {
+                InstallLog.shared.append("restore: 直刷装完私有接口没叫动海报应用，退 posterboard:// 暗号。")
+                installResult = "安装成功（直刷）：正在拉起海报界面…"
+                UIApplication.shared.open(posterBoardURL) { ok in
+                    DispatchQueue.main.async {
+                        if ok {
+                            installResult = "安装成功（直刷）：海报界面拉起来了——上滑关掉卡片，锁屏长按进图库查看。"
+                        } else {
+                            InstallLog.shared.append("restore: 直刷装完暗号也没叫动海报应用。")
+                            if report.refresh?.confirmed != true {
+                                Task {
+                                    let sent = await Task.detached(priority: .userInitiated) {
+                                        RestoreTest.notifyPosterBoardReread()
+                                    }.value
+                                    InstallLog.shared.append("restore: 直刷装完刷新没确认，自动注销桌面（通知已发：\(sent)）。")
+                                    DesktopRestart.trigger()
+                                    installResult = "安装成功（直刷）：海报没叫动，桌面正在刷新，回来后锁屏长按进图库查看。"
+                                    installLogText = InstallLog.shared.tail(60)
+                                }
+                            } else {
+                                installResult = "安装成功（直刷）：海报没叫动——锁屏长按进图库看看装没装上。"
+                            }
+                        }
+                    }
+                }
+            } else {
+                installResult = "安装成功（直刷）：海报没叫动——锁屏长按进图库看看装没装上。"
             }
         } else if Task.isCancelled {
             // 用户点了停止（`try?` 把取消错误吞成了 nil）。

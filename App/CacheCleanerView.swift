@@ -382,6 +382,8 @@ final class CacheCleanerModel: NSObject, ObservableObject, WQCacheEngineDelegate
 
 struct CacheCleanerView: View {
     @StateObject private var model = CacheCleanerModel()
+    /// 扫描日志展开状态（V2.9.2，默认收起）。
+    @State private var showScanLog = false
 
     var body: some View {
         ScrollView {
@@ -467,6 +469,23 @@ struct CacheCleanerView: View {
                     .foregroundStyle(.secondary.opacity(0.7))
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.top, 4)
+
+                // 扫描日志（V2.9.2）：扫不出别的 App 时，把 WQ 的扫描日志露出来，
+                // 用户发回来就能看到底是哪步只返回了本 App——关键看“scan:
+                // container manager: X apps”和“scan: LaunchServices API: N
+                // apps”那两行各列了几个 App。只做展示，不碰扫描/清理逻辑。
+                DisclosureGroup(isExpanded: $showScanLog) {
+                    ScrollView {
+                        Text(wq_log_text())
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                    }
+                    .frame(maxHeight: 300)
+                } label: {
+                    Text("扫描日志").font(.subheadline)
+                }
             }
             .padding()
         }
