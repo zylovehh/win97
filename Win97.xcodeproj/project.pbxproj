@@ -66,12 +66,12 @@ DD534E402EF74B30B8D23846 /* hello_splash.mp4 in Resources */ = {isa = PBXBuildFi
 		E1B2C3D4E5F6A7B8C9D0E503 /* GlassIconButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1B2C3D4E5F6A7B8C9D0E504 /* GlassIconButton.swift */; };
 		E1B2C3D4E5F6A7B8C9D0E505 /* ExportFlowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1B2C3D4E5F6A7B8C9D0E506 /* ExportFlowView.swift */; };
 		E1B2C3D4E5F6A7B8C9D0E507 /* InstalledWallpaperExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1B2C3D4E5F6A7B8C9D0E508 /* InstalledWallpaperExporter.swift */; };
-		CEBBADDF28DD308FDEE2F5E0 /* WQLocalization.m in Sources */ = {isa = PBXBuildFile; fileRef = D92809AC6FFA1FEC3897C93F /* WQLocalization.m */; };
-		2C48F861644DBD98345F22D5 /* WQCore.m in Sources */ = {isa = PBXBuildFile; fileRef = 4428F3F798B12E178DDA5EC6 /* WQCore.m */; };
-		5FA9BA79DE5D9C23EC4822D9 /* WQAccess.m in Sources */ = {isa = PBXBuildFile; fileRef = AE312D340348A9CC66B1A67C /* WQAccess.m */; };
-		308A55885A352BC127B93293 /* WQLaunchServices.m in Sources */ = {isa = PBXBuildFile; fileRef = 40A59530CFAA1691BD66D12A /* WQLaunchServices.m */; };
-		A8E8CEA0073CED6567BD5F0E /* WQScanTask.m in Sources */ = {isa = PBXBuildFile; fileRef = 7CD831E059A8264471326CE2 /* WQScanTask.m */; };
-		6C3CCBBE0141FB96F78D40CB /* WQCacheEngine.m in Sources */ = {isa = PBXBuildFile; fileRef = F739EA9FA1D3ABB0A58E31B6 /* WQCacheEngine.m */; };
+		CEBBADDF28DD308FDEE2F5E0 /* WQLocalization.m in Sources */ = {isa = PBXBuildFile; fileRef = D92809AC6FFA1FEC3897C93F /* WQLocalization.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
+		2C48F861644DBD98345F22D5 /* WQCore.m in Sources */ = {isa = PBXBuildFile; fileRef = 4428F3F798B12E178DDA5EC6 /* WQCore.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
+		5FA9BA79DE5D9C23EC4822D9 /* WQAccess.m in Sources */ = {isa = PBXBuildFile; fileRef = AE312D340348A9CC66B1A67C /* WQAccess.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
+		308A55885A352BC127B93293 /* WQLaunchServices.m in Sources */ = {isa = PBXBuildFile; fileRef = 40A59530CFAA1691BD66D12A /* WQLaunchServices.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
+		A8E8CEA0073CED6567BD5F0E /* WQScanTask.m in Sources */ = {isa = PBXBuildFile; fileRef = 7CD831E059A8264471326CE2 /* WQScanTask.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
+		6C3CCBBE0141FB96F78D40CB /* WQCacheEngine.m in Sources */ = {isa = PBXBuildFile; fileRef = F739EA9FA1D3ABB0A58E31B6 /* WQCacheEngine.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
 		DF4EDDDC556C98BF78FB1A17 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10E20800A6A1C1D2B0C89C42 /* Theme.swift */; };
 		B985816B039BC19FBFE4F42B /* CacheCleanerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8AC8302AFC89C6497E39F564 /* CacheCleanerView.swift */; };
 		BFF04CC63120931BD17C09BA /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = 2657061DEB5C51BA117CBBD7 /* Localizable.strings */; };
